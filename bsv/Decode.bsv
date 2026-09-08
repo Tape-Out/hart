@@ -80,10 +80,20 @@ function Decoded decode(Bit#(32) i, Bool hasMul);
     7'b0010011: begin
       d.kind = Imm;
       d.imm  = immI(i);
-      // 移位立即数的 funct7 也编码算术右移
-      d.alu  = (fn3 == 1) ? OpSll
-             : (fn3 == 5) ? (fn7[5] == 1 ? OpSra : OpSrl)
-             : base;
+      // 立即数型不能借用 base：31:25 位是立即数的一部分，不是 funct7。
+      // 借了的话 addi rd, rs, -1 会被译成 sub（负立即数的高位恰好把
+      // fn7[5] 置一），而这错法在正数立即数下完全看不出来。
+      // 只有移位是例外——它的立即数只占 4:0，高位真的编码算术右移。
+      d.alu  = case (fn3)
+                 0: OpAdd;
+                 1: OpSll;
+                 2: OpSlt;
+                 3: OpSltu;
+                 4: OpXor;
+                 5: (fn7[5] == 1 ? OpSra : OpSrl);
+                 6: OpOr;
+                 default: OpAnd;
+               endcase;
     end
     7'b0000011: begin d.kind = Load;   d.imm = immI(i); end
     7'b0100011: begin d.kind = Store;  d.imm = immS(i); end
