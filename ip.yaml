@@ -29,6 +29,23 @@ features:
     type: bool
     default: false
     desc: 监管者态。E27 证过特权级范围是一个开关而不是架构分岔
+test:
+  # S 级的委托（medeleg / mideleg 与 S 态陷入）还没实现，这些位现在只是
+  # 软件读得到写得进的占位；smode 关掉时它们整体消失，开着时也只到这一步。
+  # mscratch 按规范本来就是纯软件暂存，硬件永远不读它。
+  unused:
+  - mstatus_sie
+  - mstatus_spie
+  - mstatus_spie_in
+  - mstatus_spp
+  - mstatus_spp_in
+  - mie_ssie
+  - mie_stie
+  - mie_seie
+  - mip_ssip_in
+  - mip_stip_in
+  - mip_seip_in
+  - mscratch
 emit:
 - kind: bsv
   package: Hart
