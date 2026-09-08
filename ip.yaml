@@ -2,7 +2,9 @@ name: hart
 version: 0.1.0
 spec: '0.1'
 kind: ip
-lang: [bsv, bh]
+lang:
+- bsv
+- bh
 identity:
   slug: hart-tapeout-bsv
   display_name: RV32I machine mode core
@@ -25,14 +27,15 @@ features:
     type: bool
     default: true
     desc: M 扩展。乘法四周期、除法逐位，见 E28
+    area:
+      fixed: 7381.639999999999
   smode:
     type: bool
     default: false
     desc: 监管者态。E27 证过特权级范围是一个开关而不是架构分岔
+    area:
+      fixed: 0.0
 test:
-  # S 级的委托（medeleg / mideleg 与 S 态陷入）还没实现，这些位现在只是
-  # 软件读得到写得进的占位；smode 关掉时它们整体消失，开着时也只到这一步。
-  # mscratch 按规范本来就是纯软件暂存，硬件永远不读它。
   unused:
   - mstatus_sie
   - mstatus_spie
@@ -67,3 +70,36 @@ emit:
     type: HartPins
 deps:
   hwcore: ^0.1
+area:
+  base:
+    fixed: 36303.12
+  margin: 0.0
+  model: measured-grid
+  error:
+    bound: 0.0
+    sign: exact
+    note: two boolean knobs make four combinations, and all four were measured, so
+      every configuration is a table lookup and nothing is ever extrapolated
+  measured:
+  - at:
+      mul: false
+      smode: false
+    um2: 36303.12
+  - at:
+      mul: false
+      smode: true
+    um2: 35939.96
+  - at:
+      mul: true
+      smode: false
+    um2: 43684.76
+  - at:
+      mul: true
+      smode: true
+    um2: 42973.28
+  corner:
+    tool: ecc
+    pdk: ics55
+    freq_mhz: 100
+    measured: '2026-09-09'
+    gen_digest: sha256:70b404ab7c121967
