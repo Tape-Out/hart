@@ -1,0 +1,106 @@
+ip: hart
+contract: { aw: 12, dw: 32 }
+base: 0x0
+size: 0x1000
+params: []
+
+# CSR 空间本来就是一个 12 位地址空间，读写语义也正是 regmap 描述的那套，
+# 所以这里生成的 RegIf 不接总线，接的是核自己的 CSR 指令通路。
+# csrrs / csrrc 拆成「读一拍、写一拍」——三级流水停顿而不旁路，两拍吃得下。
+
+regs:
+  - name: mstatus
+    offset: 0x300
+    desc: machine status
+    fields:
+      - { name: sie,  bits: "1:1",   sw: rw, hw: r, reset: 0, feature: smode }
+      - { name: mie,  bits: "3:3",   sw: rw, hw: rw, reset: 0 }
+      - { name: spie, bits: "5:5",   sw: rw, hw: rw, reset: 0, feature: smode }
+      - { name: mpie, bits: "7:7",   sw: rw, hw: rw, reset: 0 }
+      - { name: spp,  bits: "8:8",   sw: rw, hw: rw, reset: 0, feature: smode }
+      - { name: mpp,  bits: "12:11", sw: rw, hw: rw, reset: 3 }
+
+  - name: misa
+    offset: 0x301
+    desc: extensions, read only in this implementation
+    fields: [ { name: val, width: 32, sw: r, hw: w, volatile: true } ]
+
+  - name: mie
+    offset: 0x304
+    desc: interrupt enable
+    fields:
+      - { name: ssie, bits: "1:1",   sw: rw, hw: r, reset: 0, feature: smode }
+      - { name: msie, bits: "3:3",   sw: rw, hw: r, reset: 0 }
+      - { name: stie, bits: "5:5",   sw: rw, hw: r, reset: 0, feature: smode }
+      - { name: mtie, bits: "7:7",   sw: rw, hw: r, reset: 0 }
+      - { name: seie, bits: "9:9",   sw: rw, hw: r, reset: 0, feature: smode }
+      - { name: meie, bits: "11:11", sw: rw, hw: r, reset: 0 }
+
+  - name: mtvec
+    offset: 0x305
+    desc: trap vector base and mode
+    fields:
+      - { name: mode, bits: "1:0",  sw: rw, hw: r, reset: 0 }
+      - { name: base, bits: "31:2", sw: rw, hw: r, reset: 0 }
+
+  - name: mscratch
+    offset: 0x340
+    desc: scratch register for the trap handler
+    fields: [ { name: val, width: 32, sw: rw, hw: r, reset: 0 } ]
+
+  - name: mepc
+    offset: 0x341
+    desc: exception program counter
+    fields: [ { name: val, width: 32, sw: rw, hw: rw, reset: 0 } ]
+
+  - name: mcause
+    offset: 0x342
+    desc: trap cause
+    fields:
+      - { name: code, bits: "30:0",  sw: rw, hw: rw, reset: 0 }
+      - { name: intr, bits: "31:31", sw: rw, hw: rw, reset: 0 }
+
+  - name: mtval
+    offset: 0x343
+    desc: bad address or instruction
+    fields: [ { name: val, width: 32, sw: rw, hw: rw, reset: 0 } ]
+
+  - name: mip
+    offset: 0x344
+    desc: interrupt pending, driven by the platform
+    fields:
+      - { name: ssip, bits: "1:1",   sw: r, hw: w, volatile: true, feature: smode }
+      - { name: msip, bits: "3:3",   sw: r, hw: w, volatile: true }
+      - { name: stip, bits: "5:5",   sw: r, hw: w, volatile: true, feature: smode }
+      - { name: mtip, bits: "7:7",   sw: r, hw: w, volatile: true }
+      - { name: seip, bits: "9:9",   sw: r, hw: w, volatile: true, feature: smode }
+      - { name: meip, bits: "11:11", sw: r, hw: w, volatile: true }
+
+  # 两个计数器软件只读。可写的话它们要变成软硬双写的 CReg，
+  # 而硬件那一侧每拍都写、软件那一侧又要在 CSR 访问里读，
+  # 加上退休脉冲就首尾相接成环，bsc 判 CSR 规则永不触发。
+  # 小核把 mcycle/minstret 做成只读是常见且写明的取舍。
+  - name: mcycle
+    offset: 0xB00
+    desc: cycle counter, low word, read only in this implementation
+    fields: [ { name: val, width: 32, sw: r, hw: rw, reset: 0 } ]
+
+  - name: minstret
+    offset: 0xB02
+    desc: retired instruction counter, low word, read only in this implementation
+    fields: [ { name: val, width: 32, sw: r, hw: rw, reset: 0 } ]
+
+  - name: mvendorid
+    offset: 0xF11
+    desc: vendor, zero means not implemented
+    fields: [ { name: val, width: 32, sw: r, hw: w, volatile: true } ]
+
+  - name: marchid
+    offset: 0xF12
+    desc: architecture id
+    fields: [ { name: val, width: 32, sw: r, hw: w, volatile: true } ]
+
+  - name: mhartid
+    offset: 0xF14
+    desc: hart id, tied off at assembly time
+    fields: [ { name: val, width: 32, sw: r, hw: w, volatile: true } ]

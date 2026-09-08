@@ -1,0 +1,52 @@
+name: hart
+version: 0.1.0
+spec: '0.1'
+kind: ip
+lang: bsv
+identity:
+  slug: hart-tapeout-bsv
+  display_name: RV32I machine mode core
+  summary: Three stages, stall rather than bypass, four cycle multiply.
+  category: core
+  subcategories:
+  - riscv
+  ip_family: hart
+  integration_profile: []
+  maturity: planned
+contract:
+  version: 1
+  ctrl:
+    shape: none
+    aw: 12
+    dw: 32
+params: {}
+features:
+  mul:
+    type: bool
+    default: true
+    desc: M 扩展。乘法四周期、除法逐位，见 E28
+  smode:
+    type: bool
+    default: false
+    desc: 监管者态。E27 证过特权级范围是一个开关而不是架构分岔
+emit:
+- kind: bsv
+  package: Hart
+  module: mkHart
+  config_type: HartCfg
+  interface: HartIfc
+  pins:
+  - name: imem
+    type: RegManager
+    targs:
+    - 32
+    - 32
+  - name: dmem
+    type: RegManager
+    targs:
+    - 32
+    - 32
+  - name: pins
+    type: HartPins
+deps:
+  hwcore: ^0.1
