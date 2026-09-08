@@ -163,7 +163,8 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
     if (irqPending) begin
       enterTrap(irqCode, True, 0);
       pc <= trapTarget(irqCode, True);
-    end else if (iRdy) begin
+    end else begin
+      // 举手不放，等授予。授予与响应同拍到，所以只看 iRspV 就够。
       iValid <= True;
       st <= Wait;
     end
