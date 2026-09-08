@@ -38,6 +38,10 @@ interface HartPins;
                     (* port = "meip" *) Bool meip);
   (* always_ready, always_enabled, prefix = "" *)
   method Action hartid((* port = "hartid" *) Bit#(32) v);
+  // 拉高就不取指。调试要停核，测试台要在核跑之前把程序装进内存，
+  // 两件事是同一个需求。
+  (* always_ready, always_enabled, prefix = "" *)
+  method Action halt((* port = "halt" *) Bool v);
 endinterface
 
 interface HartIfc#(numeric type aw, numeric type dw);
@@ -82,6 +86,7 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
   PulseWire retire <- mkPulseWire;
   Reg#(Bit#(32))  hid   <- mkReg(0);
   Wire#(Bit#(32)) hidIn <- mkBypassWire;
+  Wire#(Bool)     halted <- mkBypassWire;
 
   function Bit#(32) rd(Bit#(5) i) = (i == 0) ? 0 : rf[i];
 
@@ -159,7 +164,7 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
          ? base + (zeroExtend(code) << 2) : base;
   endfunction
 
-  rule doFetch (st == Fetch);
+  rule doFetch (st == Fetch && !halted);
     if (irqPending) begin
       enterTrap(irqCode, True, 0);
       pc <= trapTarget(irqCode, True);
@@ -337,6 +342,7 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
       meipIn._write(meip);
     endmethod
     method Action hartid(Bit#(32) v); hidIn._write(v); endmethod
+    method Action halt(Bool v); halted._write(v); endmethod
   endinterface
 endmodule
 

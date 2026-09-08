@@ -177,6 +177,7 @@ module mkTb(Empty);
   rule plat;
     cpu.pins.irq(False, False, False);
     cpu.pins.hartid(0);
+    cpu.pins.halt(False);
   endrule
 endmodule
 
