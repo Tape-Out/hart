@@ -91,4 +91,16 @@ module mkMuldiv(MuldivIfc);
   endmethod
 endmodule
 
+// 关掉 M 扩展时用这个。光靠译码不出乘法指令是不够的——模块还在那儿，
+// 综合器留着它的复位逻辑与输出，实测面积几乎没变（43,192 对 43,289）。
+// 特性开关要真的不例化，才叫省下来了。
+module mkMuldivNone(MuldivIfc);
+  method Bool     idle   = True;
+  method Action   start(AluOp op, Bit#(32) a, Bit#(32) b);
+    noAction;
+  endmethod
+  method Bool     done   = False;
+  method Bit#(32) result = 0;
+endmodule
+
 endpackage

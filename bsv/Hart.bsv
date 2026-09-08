@@ -52,7 +52,7 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
     provisos (Add#(aw, 0, 12), Add#(dw, 0, 32));
 
   HartRegsIfc#(aw, dw) csrf <- mkHartRegs(HartRegsCfg { smode: cfg.smode });
-  MuldivIfc md <- mkMuldiv;
+  MuldivIfc md <- (cfg.mul ? mkMuldiv : mkMuldivNone);
 
   Vector#(32, Reg#(Bit#(32))) rf <- replicateM(mkConfigReg(0));
   Reg#(Bit#(32)) pc    <- mkConfigReg('h8000_0000);
