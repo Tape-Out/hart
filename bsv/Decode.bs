@@ -1,0 +1,142 @@
+package Decode where
+
+-- RV32I + Zicsr + M 的译码。纯组合，没有状态——译码出错时看这一个函数就够。
+--
+-- 这一份写成 BH（Bluespec 的 Haskell 语法）而不是 BSV，理由是「加一条扩展
+-- 等于加一条方程」：这里没有按拍推进的协议，只有一张 32 位字到语义的映射。
+-- 用可变结构体逐字段赋值写，将来加 C、A、F 要往同一个 case 里越塞越深；
+-- 用方程写，每个指令族各占一行，互不相干。
+--
+-- 更实在的一条：立即数型与寄存器型的运算表原先是抄两份的，抄的那份借用了
+-- fn7[5]，于是 addi rd, rs, -1 被译成 sub（负立即数的高位恰好把那一位置一，
+-- 正立即数完全看不出来）。方程写法里这个关系写得出来——immOp 除移位外直接
+-- 转调 regOp 并把 fn7 传 0，两份表合成一份，那个错就无处可藏。
+
+data AluOp = OpAdd | OpSub | OpSll | OpSlt | OpSltu | OpXor | OpSrl | OpSra
+           | OpOr | OpAnd
+           | OpMul | OpMulh | OpMulhsu | OpMulhu | OpDiv | OpDivu | OpRem
+           | OpRemu
+  deriving (Bits, Eq, FShow)
+
+data Kind = Reg | Imm | Branch | Load | Store | Jal | Jalr | Lui | Auipc
+          | Csr | Sys | Bad
+  deriving (Bits, Eq, FShow)
+
+data CsrOp = CsrRw | CsrRs | CsrRc
+  deriving (Bits, Eq, FShow)
+
+struct Decoded =
+    kind   :: Kind
+    alu    :: AluOp
+    rd     :: Bit 5
+    rs1    :: Bit 5
+    rs2    :: Bit 5
+    imm    :: Bit 32
+    fn3    :: Bit 3
+    csr    :: Bit 12
+    csrOp  :: CsrOp
+    csrImm :: Bool          -- csrrwi 这一族，源是立即数不是寄存器
+    isMul  :: Bool
+  deriving (Bits, FShow)
+
+immI :: Bit 32 -> Bit 32
+immI i = signExtend i[31:20]
+
+immS :: Bit 32 -> Bit 32
+immS i = signExtend (i[31:25] ++ i[11:7])
+
+immB :: Bit 32 -> Bit 32
+immB i = signExtend (i[31:31] ++ i[7:7] ++ i[30:25] ++ i[11:8] ++ (0 :: Bit 1))
+
+immU :: Bit 32 -> Bit 32
+immU i = i[31:12] ++ (0 :: Bit 12)
+
+immJ :: Bit 32 -> Bit 32
+immJ i =
+  signExtend (i[31:31] ++ i[19:12] ++ i[20:20] ++ i[30:21] ++ (0 :: Bit 1))
+
+regOp :: Bit 3 -> Bit 7 -> AluOp
+regOp f fn7 =
+  case f of
+    0 -> if fn7[5:5] == 1 then OpSub else OpAdd
+    1 -> OpSll
+    2 -> OpSlt
+    3 -> OpSltu
+    4 -> OpXor
+    5 -> if fn7[5:5] == 1 then OpSra else OpSrl
+    6 -> OpOr
+    _ -> OpAnd
+
+-- 立即数型只有移位借得到 fn7：移位的立即数只占 4:0，高位真的编码算术右移。
+-- 别处 31:25 是立即数本身，所以 fn7 传 0——两份表于是合成一份。
+immOp :: Bit 3 -> Bit 7 -> AluOp
+immOp f fn7 = if f == 5 then regOp 5 fn7 else regOp f 0
+
+mulOp :: Bit 3 -> AluOp
+mulOp f =
+  case f of
+    0 -> OpMul
+    1 -> OpMulh
+    2 -> OpMulhsu
+    3 -> OpMulhu
+    4 -> OpDiv
+    5 -> OpDivu
+    6 -> OpRem
+    _ -> OpRemu
+
+csrKind :: Bit 2 -> CsrOp
+csrKind f =
+  case f of
+    1 -> CsrRw
+    2 -> CsrRs
+    _ -> CsrRc
+
+decode :: Bit 32 -> Bool -> Decoded
+decode i hasMul =
+  let op :: Bit 7
+      op = i[6:0]
+      fn3 :: Bit 3
+      fn3 = i[14:12]
+      fn7 :: Bit 7
+      fn7 = i[31:25]
+      d0 = Decoded { kind = Bad; alu = OpAdd; rd = i[11:7]; rs1 = i[19:15];
+                     rs2 = i[24:20]; imm = 0; fn3 = fn3; csr = i[31:20];
+                     csrOp = CsrRw; csrImm = False; isMul = False }
+  in case op of
+       -- M 扩展与基本运算共用这个 opcode，靠 funct7 分开
+       0x33 -> if fn7 == 1
+                 then d0 { kind = if hasMul then Reg else Bad;
+                           alu = mulOp fn3; isMul = True }
+                 else d0 { kind = Reg; alu = regOp fn3 fn7 }
+       0x13 -> d0 { kind = Imm; alu = immOp fn3 fn7; imm = immI i }
+       0x03 -> d0 { kind = Load;   imm = immI i }
+       0x23 -> d0 { kind = Store;  imm = immS i }
+       0x63 -> d0 { kind = Branch; imm = immB i }
+       0x6f -> d0 { kind = Jal;    imm = immJ i }
+       0x67 -> d0 { kind = Jalr;   imm = immI i }
+       0x37 -> d0 { kind = Lui;    imm = immU i }
+       0x17 -> d0 { kind = Auipc;  imm = immU i }
+       0x73 -> if fn3 == 0
+                 then d0 { kind = Sys; imm = zeroExtend i[31:20] }
+                 else d0 { kind = Csr; csrImm = fn3[2:2] == 1;
+                           csrOp = csrKind fn3[1:0];
+                           imm = zeroExtend i[19:15] }
+       0x0f -> d0 { kind = Sys }        -- fence 当空操作，本实现顺序执行
+       _ -> d0
+
+-- 写不写寄存器堆。x0 永远不写，判一次省得每处都判。
+isWriter :: Kind -> Bool
+isWriter k =
+  case k of
+    Reg -> True
+    Imm -> True
+    Load -> True
+    Jal -> True
+    Jalr -> True
+    Lui -> True
+    Auipc -> True
+    Csr -> True
+    _ -> False
+
+writesReg :: Decoded -> Bool
+writesReg d = d.rd /= 0 && isWriter d.kind
