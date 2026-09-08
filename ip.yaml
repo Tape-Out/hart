@@ -2,7 +2,7 @@ name: hart
 version: 0.1.0
 spec: '0.1'
 kind: ip
-lang: bsv
+lang: [bsv, bh]
 identity:
   slug: hart-tapeout-bsv
   display_name: RV32I machine mode core
