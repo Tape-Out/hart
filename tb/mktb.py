@@ -196,7 +196,8 @@ module mkHart{label}Tb(Empty);
         seen <= seen + 1;
         if (seen + 1 == fromInteger(expLen)) begin
           if (bad) $display("FAILED");
-          else $display("PASS all %0d checks", expLen);
+          else $display("PASS all %0d checks in %0d cycles, %0d instructions",
+                        expLen, cyc, progLen);
           $finish(bad ? 1 : 0);
         end
       end

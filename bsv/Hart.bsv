@@ -26,7 +26,7 @@ typedef struct {
   Bool smode;
 } HartCfg;
 
-typedef enum { Fetch, Wait, Exec, Mem, Muls, CsrRd, CsrWr }
+typedef enum { Fetch, Exec, Mem, Muls, CsrRd, CsrWr }
   Stage deriving (Bits, Eq, FShow);
 
 // 平台送进来的东西：三根中断线与本核的编号。收在一个子接口里，
@@ -67,7 +67,9 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
   Reg#(Bit#(32)) csrNv <- mkReg(0);
   Reg#(Bool)     csrWr <- mkReg(False);
 
-  Reg#(Bool) iValid <- mkConfigReg(False);
+  // 取指的举手是组合的：请求当拍出去、响应当拍回来，于是取指只占一拍。
+  // 原来用寄存器举手，请求要下一拍才出现在总线上，白搭一拍（每条指令三拍）。
+  // 存储真有延迟时这只是「举手不放」，行为不变——手一直举着直到授予。
   Reg#(Bool) dValid <- mkConfigReg(False);
   Reg#(RegReq#(32, 32)) dReq <- mkReg(unpack(0));
 
@@ -164,22 +166,16 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
          ? base + (zeroExtend(code) << 2) : base;
   endfunction
 
-  rule doFetch (st == Fetch && !halted);
-    if (irqPending) begin
-      enterTrap(irqCode, True, 0);
-      pc <= trapTarget(irqCode, True);
-    end else begin
-      // 举手不放，等授予。授予与响应同拍到，所以只看 iRspV 就够。
-      iValid <= True;
-      st <= Wait;
-    end
+  rule doTrapEntry (st == Fetch && !halted && irqPending);
+    enterTrap(irqCode, True, 0);
+    pc <= trapTarget(irqCode, True);
   endrule
 
-  rule doWait (st == Wait && iRspV);
-    iValid <= False;
-    instr  <= iRspX.rdata;
-    dec    <= decode(iRspX.rdata, cfg.mul);
-    st     <= Exec;
+  // 响应回来了才走。没回来就停在 Fetch，手一直举着。
+  rule doFetch (st == Fetch && !halted && !irqPending && iRspV);
+    instr <= iRspX.rdata;
+    dec   <= decode(iRspX.rdata, cfg.mul);
+    st    <= Exec;
   endrule
 
   rule doExec (st == Exec);
@@ -315,7 +311,7 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
   endrule
 
   interface RegManager imem;
-    method Bool valid = iValid;
+    method Bool valid = st == Fetch && !halted && !irqPending;
     method RegReq#(32, 32) req = RegReq { addr: pc, write: False,
                                           wdata: 0, wstrb: 4'hF };
     method Action ready(Bool v); iRdy._write(v); endmethod
