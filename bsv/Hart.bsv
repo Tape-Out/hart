@@ -229,6 +229,15 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
   endfunction
 
   Bit#(32) pfAddr  = pc + 4;
+
+  // 这笔响应是哪个地址的。原来直接拿当拍发出去的地址判，那假设「响应与请求
+  // 同拍」——只对组合应答的目标成立。存储慢一拍（缓存就是），回来的是上一笔，
+  // 链接会把上一笔的数当成下一条指令接上。
+  //
+  // 记的时机是「被收下但没同拍答复」。组合目标上两件事同拍发生，什么也记不下，
+  // 判的还是当拍地址，行为一字不变。
+  Reg#(Bool)     inFlt <- mkConfigReg(False);
+  Reg#(Bit#(32)) fltAd <- mkConfigReg(0);
   Bool     needNow = st == Fetch && !halted && !irqPending;
   // 除法一位一拍要磨三十几拍，那几拍里不举手——请求举着也没处放，
   // 只是白占总线仲裁。末拍再举，链接照样接得上。
@@ -237,11 +246,13 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
   // 一条指令的最后一拍都走这里：顺序下一条这拍已经取回来了就直接接上，
   // 省掉回 Fetch 的那一拍。访存、乘除、读写 CSR 的末拍 pc 还停在本条上，
   // pfAddr 正好是下一条；跳走了地址对不上，照旧回 Fetch 重取。
+  Bit#(32) askAd = needNow ? pc : pfAddr;
+  Bit#(32) rspAd = inFlt ? fltAd : askAd;
   function Action advance(Bit#(32) nPc) = action
     // 待决中断必须让链接断开：链接跳过的正是 Fetch 那一拍，而中断只在那里
     // 检查。不断开的话一段直线代码能把中断拖到段尾，S 软件中断的用例就是
     // 这么暴露出来的（自己写 sip.SSIP，却先把后面两条执行完了）。
-    Bool chain = iRspV && (pfAddr == nPc) && !irqSeen;
+    Bool chain = iRspV && (rspAd == nPc) && !irqSeen;
     if (chain) begin
       instr <= iRspX.rdata;
       dec   <= decode(iRspX.rdata, cfg.mul);
@@ -250,13 +261,23 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
     st <= chain ? Exec : Fetch;
   endaction;
 
+
+  rule track;
+    if ((needNow || wantPf) && iRdy && !iRspV) begin
+      inFlt <= True;
+      fltAd <= askAd;
+    end else if (iRspV)
+      inFlt <= False;
+  endrule
+
   rule doTrapEntry (st == Fetch && !halted && irqPending);
     enterTrap(irqCode, True, 0);
     pc <= trapTarget(irqCode, True);
   endrule
 
   // 响应回来了才走。没回来就停在 Fetch，手一直举着。
-  rule doFetch (st == Fetch && !halted && !irqPending && iRspV);
+  rule doFetch (st == Fetch && !halted && !irqPending && iRspV
+                && rspAd == pc);
     instr <= iRspX.rdata;
     dec   <= decode(iRspX.rdata, cfg.mul);
     st    <= Exec;
@@ -415,8 +436,8 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
 
   interface RegManager imem;
     method Bool valid = needNow || wantPf;
-    method RegReq#(32, 32) req = RegReq { addr: needNow ? pc : pfAddr,
-                                          write: False, wdata: 0, wstrb: 4'hF };
+    method RegReq#(32, 32) req = RegReq { addr: askAd, write: False,
+                                          wdata: 0, wstrb: 4'hF };
 
     method Action ready(Bool v); iRdy._write(v); endmethod
     method Action resp(Bool v, RegRsp#(32) x);
