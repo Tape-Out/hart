@@ -29,13 +29,18 @@ typedef struct {
 typedef enum { Fetch, Exec, Mem, Muls, CsrRd, CsrWr }
   Stage deriving (Bits, Eq, FShow);
 
-// 平台送进来的东西：三根中断线与本核的编号。收在一个子接口里，
-// 生成的顶层照 emit.pins 原样透传，跟其它 IP 一个形状。
-interface HartPins;
+// 平台内部的三根中断线单列一个子接口：装配要把 aclint 的 mtip 与 plic 的 eip
+// 接到这里，而一个 always_enabled 方法不能既被片内规则调、又从顶层透传出去。
+// 分开之后，装配里接了 irq 就不透传 irq，hartid 与 halt 照旧露到顶层——
+// 那两个本来就是板级的：编号是接线定的，停核是调试要的。
+interface HartIrq;
   (* always_ready, always_enabled, prefix = "" *)
   method Action irq((* port = "msip" *) Bool msip,
                     (* port = "mtip" *) Bool mtip,
                     (* port = "meip" *) Bool meip);
+endinterface
+
+interface HartPins;
   (* always_ready, always_enabled, prefix = "" *)
   method Action hartid((* port = "hartid" *) Bit#(32) v);
   // 拉高就不取指。调试要停核，测试台要在核跑之前把程序装进内存，
@@ -47,6 +52,7 @@ endinterface
 interface HartIfc#(numeric type aw, numeric type dw);
   interface RegManager#(32, 32) imem;
   interface RegManager#(32, 32) dmem;
+  interface HartIrq             irq;
   interface HartPins            pins;
 endinterface
 
@@ -429,12 +435,15 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
     endmethod
   endinterface
 
-  interface HartPins pins;
+  interface HartIrq irq;
     method Action irq(Bool msip, Bool mtip, Bool meip);
       msipIn._write(msip);
       mtipIn._write(mtip);
       meipIn._write(meip);
     endmethod
+  endinterface
+
+  interface HartPins pins;
     method Action hartid(Bit#(32) v); hidIn._write(v); endmethod
     method Action halt(Bool v); halted._write(v); endmethod
   endinterface

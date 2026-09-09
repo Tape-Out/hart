@@ -272,7 +272,7 @@ module mkHart{label}Tb(Empty);
   endrule
 
   rule plat;
-    cpu.pins.irq(False, False, False);
+    cpu.irq.irq(False, False, False);
     cpu.pins.hartid(0);
     cpu.pins.halt(False);
   endrule
