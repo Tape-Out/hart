@@ -37,7 +37,9 @@ interface HartIrq;
   (* always_ready, always_enabled, prefix = "" *)
   method Action irq((* port = "msip" *) Bool msip,
                     (* port = "mtip" *) Bool mtip,
-                    (* port = "meip" *) Bool meip);
+                    (* port = "meip" *) Bool meip,
+                    // 这一根是边沿不是电平：SSWI 写一次送一拍，清零归软件
+                    (* port = "ssip_set" *) Bool ssipSet);
 endinterface
 
 interface HartPins;
@@ -99,6 +101,7 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
   Wire#(RegRsp#(32)) dRspX <- mkBypassWire;
 
   Wire#(Bool) msipIn <- mkBypassWire;
+  Wire#(Bool) ssipSetIn <- mkBypassWire;
   Wire#(Bool) mtipIn <- mkBypassWire;
   Wire#(Bool) meipIn <- mkBypassWire;
   // 退休计数不能跟 CSR 访问写在同一条规则里：minstret 是软硬双写的 CReg，
@@ -159,7 +162,7 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
   Bool msi = csrf.mie_msie == 1 && msipIn;
   Bool mti = csrf.mie_mtie == 1 && mtipIn;
   Bool mei = csrf.mie_meie == 1 && meipIn;
-  // S 级软件中断的来源就是 mip.SSIP 那一位本身，没有外来的线
+  // S 级软件中断看的是 mip.SSIP 那一位：软件能自己写，SSWI 也能置位
   Bool ssi = cfg.smode && csrf.mie_ssie == 1 && csrf.mip_ssip == 1
              && csrf.mideleg[1] == 1;
 
@@ -190,6 +193,12 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
 
   rule latchIrq;
     irqSeen <= irqPending;
+  endrule
+
+  // 单列一条：置位走 CReg 的高端口，得排在 CSR 访问之后。放进 platform
+  // 就与「platform 要排在 CSR 访问之前」首尾相接。
+  rule sswi;
+    csrf.mip_ssip_set(ssipSetIn ? 1 : 0);
   endrule
 
   rule tick;
@@ -457,7 +466,8 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
   endinterface
 
   interface HartIrq irq;
-    method Action irq(Bool msip, Bool mtip, Bool meip);
+    method Action irq(Bool msip, Bool mtip, Bool meip, Bool ssipSet);
+      ssipSetIn._write(ssipSet);
       msipIn._write(msip);
       mtipIn._write(mtip);
       meipIn._write(meip);

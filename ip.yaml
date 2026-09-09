@@ -36,6 +36,9 @@ features:
     area:
       fixed: 4070.3600000000006
 test:
+  # 访存口在收到响应之前一直顶着 valid 与 req 不动，「响应即已被接收」，所以不看 ready
+  deadread:
+  - dRdy
   unused:
   - mie_stie
   - mie_seie
@@ -74,28 +77,28 @@ area:
   error:
     bound: 0.0
     sign: exact
-    note: two boolean knobs make four combinations, and all four were measured, so
-      every configuration is a table lookup and nothing is ever extrapolated
+    note: two boolean knobs make four combinations, and all four were measured, 
+      so every configuration is a table lookup and nothing is ever extrapolated
   measured:
   - at:
       mul: false
       smode: false
-    um2: 37145.92
+    um2: 37487.8
   - at:
       mul: false
       smode: true
-    um2: 41216.28
+    um2: 41136.48
   - at:
       mul: true
       smode: false
-    um2: 44836.4
+    um2: 44482.2
   - at:
       mul: true
       smode: true
-    um2: 48286.0
+    um2: 48415.92
   corner:
     tool: ecc
     pdk: ics55
     freq_mhz: 100
-    measured: '2026-09-09'
-    gen_digest: sha256:ae6c564564ae01d3
+    measured: '2026-09-10'
+    gen_digest: sha256:1662e1f9d453fb53

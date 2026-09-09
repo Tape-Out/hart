@@ -99,9 +99,11 @@ SMODE = [
 # 特权级这一段只在 smode 开时有意义：关掉时 sret 与 S 级 CSR 都不存在，
 # 跑它测的是「核怎么处理非法指令」，不是委托对不对。
 #
-# 四件事一次走完：委托生效（S 态 ecall 直接进 stvec，不经 M）、sret 回得来、
+# 五件事一次走完：委托生效（S 态 ecall 直接进 stvec，不经 M）、sret 回得来、
 # S 态够不着 M 级 CSR（非法指令且**没**被委托，所以落在 M 手里）、
-# 以及一次真的 S 软件中断（mip.SSIP 是软件写起来的，不用加引脚）。
+# 一次软件写起来的 S 软件中断（写 sip.SSIP）、
+# 以及一次**硬件送来的**——SSWI 写 SETSSIP 只送一个边沿，
+# 由 mip.SSIP 那一位把它记住。没有这一条，`ssip_set` 那根线接没接上看不出来。
 DELEG = [
   "  lui  t2, hi(mhand)",
   "  addi t2, t2, lo(mhand)",
@@ -157,8 +159,13 @@ DELEG = [
   "  csrrw zero, 0x341, t2",
   "  mret",
 "sdone:",
+  "  addi t2, zero, 88",
+  "  sw   t2, 0(a0)",             # 软件那条走完了
+"swait:",
+  "  jal  zero, swait",           # 卡在这儿等硬件那条：测试台送一拍 ssip_set
 ]
-DELEG_EXP = [9, 55, 0x102, 66, 0x80000001, 77]
+# 末尾那个 0x80000001 是第二次进 shand 存下的 scause：只有边沿真的到了才会有
+DELEG_EXP = [9, 55, 0x102, 66, 0x80000001, 77, 88, 0x80000001]
 
 SRC = HEAD + (MEXT if mul else []) + TAIL + SMODE + (DELEG if smode else [])
 SRC += ["done:", "  jal  zero, done"]
@@ -218,6 +225,7 @@ module mkHart{label}Tb(Empty);
   Reg#(Bit#(32)) cyc  <- mkReg(0);
   Reg#(Bit#(32)) seen <- mkReg(0);
   Reg#(Bool)     bad  <- mkReg(False);
+  Reg#(Bool)     sent <- mkReg(False);
 
   function Bool inRom(Bit#(32) a) = a[31:28] == 4'h8 && a[16] == 0;
   function Bool inRam(Bit#(32) a) = a[31:28] == 4'h8 && a[16] == 1;
@@ -272,7 +280,11 @@ module mkHart{label}Tb(Empty);
   endrule
 
   rule plat;
-    cpu.irq.irq(False, False, False);
+    // 只剩最后一项没对的时候送一拍 SSWI 的边沿——程序此刻正卡在 swait 上等它。
+    // 按检查计数而不是按拍数，程序改长改短都不用重调。
+    Bool edge_ = {"True" if smode else "False"} && !sent && seen == fromInteger(expLen - 1);
+    if (edge_) sent <= True;
+    cpu.irq.irq(False, False, False, edge_);
     cpu.pins.hartid(0);
     cpu.pins.halt(False);
   endrule

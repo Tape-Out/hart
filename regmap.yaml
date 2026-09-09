@@ -83,7 +83,9 @@ regs:
     offset: 0x344
     desc: interrupt pending, driven by the platform
     fields:
-      - { name: ssip, bits: "1:1",   sw: rw, hw: r, reset: 0, feature: smode }
+      # SSWI 写 SETSSIP 送来一个边沿，硬件把这一位置上；清零归软件
+      # （特权规范也说 SSIP 在 mip/sip 里是可写位）。
+      - { name: ssip, bits: "1:1",   sw: rw, hw: r, hwset: true, reset: 0, feature: smode }
       - { name: msip, bits: "3:3",   sw: r, hw: w, volatile: true }
       - { name: stip, bits: "5:5",   sw: r, hw: w, volatile: true, feature: smode }
       - { name: mtip, bits: "7:7",   sw: r, hw: w, volatile: true }
