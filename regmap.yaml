@@ -80,6 +80,41 @@ regs:
   # 而硬件那一侧每拍都写、软件那一侧又要在 CSR 访问里读，
   # 加上退休脉冲就首尾相接成环，bsc 判 CSR 规则永不触发。
   # 小核把 mcycle/minstret 做成只读是常见且写明的取舍。
+
+  # S 级的三个视图。它们不是第二份状态，是同一份存储的第二个地址，
+  # 只露 S 级看得到的那几位——alias 就是为这件事加的。
+  # 没有它的时候只能给 sstatus 单独开存储，那样 M 侧与 S 侧各写各的，
+  # 软件看到两份互不相干的 mstatus。
+  - name: sstatus
+    offset: 0x100
+    desc: supervisor status, a masked view of mstatus
+    feature: smode
+    alias: mstatus
+    fields:
+      - { name: sie,  bits: "1:1", sw: rw, hw: r,  reset: 0 }
+      - { name: spie, bits: "5:5", sw: rw, hw: rw, reset: 0 }
+      - { name: spp,  bits: "8:8", sw: rw, hw: rw, reset: 0 }
+
+  - name: sie
+    offset: 0x104
+    desc: supervisor interrupt enable, a masked view of mie
+    feature: smode
+    alias: mie
+    fields:
+      - { name: ssie, bits: "1:1", sw: rw, hw: r, reset: 0 }
+      - { name: stie, bits: "5:5", sw: rw, hw: r, reset: 0 }
+      - { name: seie, bits: "9:9", sw: rw, hw: r, reset: 0 }
+
+  - name: sip
+    offset: 0x144
+    desc: supervisor interrupt pending, a masked view of mip
+    feature: smode
+    alias: mip
+    fields:
+      - { name: ssip, bits: "1:1", sw: r, hw: w, volatile: true }
+      - { name: stip, bits: "5:5", sw: r, hw: w, volatile: true }
+      - { name: seip, bits: "9:9", sw: r, hw: w, volatile: true }
+
   - name: mcycle
     offset: 0xB00
     desc: cycle counter, low word, read only in this implementation

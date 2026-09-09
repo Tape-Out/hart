@@ -85,13 +85,14 @@ TAIL = [
 ]
 TAIL_EXP = [1, 0x7B, 0xFF, 0xFFFFFFFF, 0x55, 0x7F]
 
-# smode 只门控 mstatus / mie / mip 里的 S 级字段，没有独立的 S 级 CSR
-# ——试着写 sscratch 是测试台自己搞错过一次。这一段两个方向都跑：
-# 开着时 mstatus.sie 写得进去，关着时读回必须是零。门控写漏了只有后者看得出来。
+# S 级的三个 CSR 是 M 级那三个的**掩码视图**（regmap 的 alias），不是第二份状态。
+# 所以这一段从 S 级的 sstatus 写进去，再从 M 级的 mstatus 读回来——
+# 读得到才说明两个地址共用同一份存储；给别名单独开存储的话这里就是 0。
+# 两个方向都跑：smode 关掉时 sstatus 不存在，写了也读不出来。
 SMODE = [
-    "  addi t2, zero, 2",           # mstatus.sie 是第 1 位
-    "  csrrs zero, 0x300, t2",
-    "  csrrs t2, 0x300, zero",
+    "  addi t2, zero, 2",           # sie 是第 1 位
+    "  csrrs zero, 0x100, t2",      # 从 S 级视图写
+    "  csrrs t2, 0x300, zero",      # 从 M 级读回来
     "  andi t2, t2, 2",
     "  sw   t2, 0(a0)",            # smode 开 -> 2，关 -> 0
 ]
