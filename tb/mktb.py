@@ -96,9 +96,74 @@ SMODE = [
     "  andi t2, t2, 2",
     "  sw   t2, 0(a0)",            # smode 开 -> 2，关 -> 0
 ]
-SRC = HEAD + (MEXT if mul else []) + TAIL + SMODE
+# 特权级这一段只在 smode 开时有意义：关掉时 sret 与 S 级 CSR 都不存在，
+# 跑它测的是「核怎么处理非法指令」，不是委托对不对。
+#
+# 四件事一次走完：委托生效（S 态 ecall 直接进 stvec，不经 M）、sret 回得来、
+# S 态够不着 M 级 CSR（非法指令且**没**被委托，所以落在 M 手里）、
+# 以及一次真的 S 软件中断（mip.SSIP 是软件写起来的，不用加引脚）。
+DELEG = [
+  "  lui  t2, hi(mhand)",
+  "  addi t2, t2, lo(mhand)",
+  "  csrrw zero, 0x305, t2",       # mtvec
+  "  lui  t2, hi(shand)",
+  "  addi t2, t2, lo(shand)",
+  "  csrrw zero, 0x105, t2",       # stvec
+  "  addi t2, zero, 0x300",
+  "  csrrw zero, 0x302, t2",       # medeleg：委托 ecall-from-U(8) 与 -from-S(9)
+  "  addi t2, zero, 2",
+  "  csrrw zero, 0x303, t2",       # mideleg：委托 S 软件中断
+  "  addi t2, zero, 1",
+  "  slli t2, t2, 11",
+  "  csrrw zero, 0x300, t2",       # mstatus.mpp = S
+  "  lui  t2, hi(sgo)",
+  "  addi t2, t2, lo(sgo)",
+  "  csrrw zero, 0x341, t2",       # mepc = sgo
+  "  mret",                        # 落到 S 态
+"sgo:",
+  "  ecall",                       # 委托了 -> 直接进 shand
+  "  addi t2, zero, 55",
+  "  sw   t2, 0(a0)",
+  "  csrrs t2, 0xF14, zero",       # S 态读 mhartid -> 非法指令 -> mhand
+  "  addi t2, zero, 66",
+  "  sw   t2, 0(a0)",
+  "  addi t2, zero, 2",
+  "  csrrs zero, 0x104, t2",       # sie.ssie
+  "  addi t2, zero, 2",
+  "  csrrs zero, 0x100, t2",       # sstatus.sie
+  "  addi t2, zero, 2",
+  "  csrrs zero, 0x144, t2",       # sip.ssip -> 中断
+  "  addi t2, zero, 77",
+  "  sw   t2, 0(a0)",
+  "  jal  zero, sdone",
+"shand:",
+  "  csrrs t2, 0x142, zero",       # scause
+  "  sw   t2, 0(a0)",
+  "  blt  t2, zero, sirq",         # 最高位是 1 就是中断
+  "  csrrs t2, 0x141, zero",
+  "  addi t2, t2, 4",
+  "  csrrw zero, 0x141, t2",       # 异常要跳过闯祸那条
+  "  sret",
+"sirq:",
+  "  addi t2, zero, 2",
+  "  csrrc zero, 0x144, t2",       # 清掉 sip.ssip，否则回去就再来一次
+  "  sret",
+"mhand:",
+  "  csrrs t2, 0x342, zero",       # mcause
+  "  addi t2, t2, 0x100",          # 打个记号。不打的话委托没生效也看不出来——
+  "  sw   t2, 0(a0)",              # M 手里的 mcause 与 S 手里的 scause 同是 9
+  "  csrrs t2, 0x341, zero",
+  "  addi t2, t2, 4",
+  "  csrrw zero, 0x341, t2",
+  "  mret",
+"sdone:",
+]
+DELEG_EXP = [9, 55, 0x102, 66, 0x80000001, 77]
+
+SRC = HEAD + (MEXT if mul else []) + TAIL + SMODE + (DELEG if smode else [])
 SRC += ["done:", "  jal  zero, done"]
-EXPECT = HEAD_EXP + (MEXT_EXP if mul else []) + TAIL_EXP + [2 if smode else 0]
+EXPECT = (HEAD_EXP + (MEXT_EXP if mul else []) + TAIL_EXP
+          + [2 if smode else 0] + (DELEG_EXP if smode else []))
 
 prog = assemble(SRC)
 rom = "\n".join(f"      {i}: return 32'h{w:08X};" for i, w in enumerate(prog))

@@ -13,7 +13,7 @@ regs:
     offset: 0x300
     desc: machine status
     fields:
-      - { name: sie,  bits: "1:1",   sw: rw, hw: r, reset: 0, feature: smode }
+      - { name: sie,  bits: "1:1",   sw: rw, hw: rw, reset: 0, feature: smode }
       - { name: mie,  bits: "3:3",   sw: rw, hw: rw, reset: 0 }
       - { name: spie, bits: "5:5",   sw: rw, hw: rw, reset: 0, feature: smode }
       - { name: mpie, bits: "7:7",   sw: rw, hw: rw, reset: 0 }
@@ -24,6 +24,20 @@ regs:
     offset: 0x301
     desc: extensions, read only in this implementation
     fields: [ { name: val, width: 32, sw: r, hw: w, volatile: true } ]
+
+  # 委托：某一位置上，对应的异常/中断在 M 以下的特权级发生时直接进 S，
+  # 不必先陷到 M 再软件转发。M 级的三个中断不可委托，那几位写了也不生效。
+  - name: medeleg
+    offset: 0x302
+    desc: exception delegation to supervisor
+    feature: smode
+    fields: [ { name: val, width: 32, sw: rw, hw: r, reset: 0 } ]
+
+  - name: mideleg
+    offset: 0x303
+    desc: interrupt delegation to supervisor
+    feature: smode
+    fields: [ { name: val, width: 32, sw: rw, hw: r, reset: 0 } ]
 
   - name: mie
     offset: 0x304
@@ -69,7 +83,7 @@ regs:
     offset: 0x344
     desc: interrupt pending, driven by the platform
     fields:
-      - { name: ssip, bits: "1:1",   sw: r, hw: w, volatile: true, feature: smode }
+      - { name: ssip, bits: "1:1",   sw: rw, hw: r, reset: 0, feature: smode }
       - { name: msip, bits: "3:3",   sw: r, hw: w, volatile: true }
       - { name: stip, bits: "5:5",   sw: r, hw: w, volatile: true, feature: smode }
       - { name: mtip, bits: "7:7",   sw: r, hw: w, volatile: true }
@@ -111,9 +125,43 @@ regs:
     feature: smode
     alias: mip
     fields:
-      - { name: ssip, bits: "1:1", sw: r, hw: w, volatile: true }
+      - { name: ssip, bits: "1:1", sw: rw, hw: r, reset: 0 }
       - { name: stip, bits: "5:5", sw: r, hw: w, volatile: true }
       - { name: seip, bits: "9:9", sw: r, hw: w, volatile: true }
+
+  - name: stvec
+    offset: 0x105
+    desc: supervisor trap vector base and mode
+    feature: smode
+    fields:
+      - { name: mode, bits: "1:0",  sw: rw, hw: r, reset: 0 }
+      - { name: base, bits: "31:2", sw: rw, hw: r, reset: 0 }
+
+  - name: sscratch
+    offset: 0x140
+    desc: scratch register for the supervisor trap handler
+    feature: smode
+    fields: [ { name: val, width: 32, sw: rw, hw: r, reset: 0 } ]
+
+  - name: sepc
+    offset: 0x141
+    desc: supervisor exception program counter
+    feature: smode
+    fields: [ { name: val, width: 32, sw: rw, hw: rw, reset: 0 } ]
+
+  - name: scause
+    offset: 0x142
+    desc: supervisor trap cause
+    feature: smode
+    fields:
+      - { name: code, bits: "30:0",  sw: rw, hw: rw, reset: 0 }
+      - { name: intr, bits: "31:31", sw: rw, hw: rw, reset: 0 }
+
+  - name: stval
+    offset: 0x143
+    desc: supervisor bad address or instruction
+    feature: smode
+    fields: [ { name: val, width: 32, sw: rw, hw: rw, reset: 0 } ]
 
   - name: mcycle
     offset: 0xB00

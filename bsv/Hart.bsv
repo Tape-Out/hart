@@ -7,7 +7,7 @@ import Decode::*;
 import Muldiv::*;
 import HartRegs::*;
 
-// RV32I[M] 机器态核心。三级：取指 / 译码执行 / 写回，**停顿而不旁路**。
+// RV32I[M] 核心，M 态必备、S/U 两态由 smode 开关决定。三级：取指 / 译码执行 / 写回，**停顿而不旁路**。
 //
 // 为什么先三级：100 MHz、55nm 下没有任何理由为频率加级数，真正决定级数的是
 // 存储延迟，而那要等缓存挂上去、在仿真里量出停顿代价再说。BSV 的规则结构让
@@ -67,9 +67,21 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
   Reg#(Bit#(32)) csrNv <- mkReg(0);
   Reg#(Bool)     csrWr <- mkReg(False);
 
+  // 当前特权级，编码同 mstatus.mpp：0 用户、1 监管者、3 机器。
+  // smode 关掉时它恒为 3，写它的地方全被 setPriv 折没，寄存器自然不留。
+  Reg#(Bit#(2))  privR <- mkConfigReg(2'b11);
+
   // 取指的举手是组合的：请求当拍出去、响应当拍回来，于是取指只占一拍。
-  // 原来用寄存器举手，请求要下一拍才出现在总线上，白搭一拍（每条指令三拍）。
+  // 原来用寄存器举手，请求要下一拍才出现在总线上，白搭一拍。
   // 存储真有延迟时这只是「举手不放」，行为不变——手一直举着直到授予。
+  //
+  // 取指还与执行**重叠**：执行当前指令的这一拍就把顺序下一条要回来，
+  // 地址对得上就直接接着执行，直线代码一条指令一拍。
+  // 不猜分支方向，只赌「下一条是 pc + 4」；跳走了对不上，回 Fetch 重取，
+  // 代价是本来也要付的那一拍。
+  //
+  // 不设缓冲寄存器：存储一拍就答的时候缓冲填得太晚，同一拍里检查不到，
+  // 白占面积。存储真慢起来，慢的也不是这一拍。
   Reg#(Bool) dValid <- mkConfigReg(False);
   Reg#(RegReq#(32, 32)) dReq <- mkReg(unpack(0));
 
@@ -122,18 +134,45 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
     endcase
   endfunction
 
-  Bool irqPending = csrf.mstatus_mie == 1 &&
-      ((csrf.mie_msie == 1 && msipIn) || (csrf.mie_mtie == 1 && mtipIn)
-       || (csrf.mie_meie == 1 && meipIn));
+  Bit#(2) priv = cfg.smode ? privR : 2'b11;
 
-  Bit#(31) irqCode = (csrf.mie_meie == 1 && meipIn) ? 11
-                   : (csrf.mie_mtie == 1 && mtipIn) ? 7 : 3;
+  function Action setPriv(Bit#(2) v) = action
+    if (cfg.smode) privR <= v;
+  endaction;
+
+  // 委托只对「在 M 以下的特权级发生」的陷入生效，M 态自己的陷入永远留在 M。
+  function Bool deleg(Bit#(31) code, Bool isIrq) =
+    cfg.smode && priv != 2'b11 &&
+    ((isIrq ? csrf.mideleg : csrf.medeleg)[code[4:0]] == 1);
+
+  // 全局开关：陷入目标级别高于当前级别时无条件接受，等于当前级别才看使能位。
+  Bool mEn = (priv != 2'b11) || csrf.mstatus_mie == 1;
+  Bool sEn = cfg.smode &&
+             ((priv == 2'b00) || (priv == 2'b01 && csrf.mstatus_sie == 1));
+
+  Bool msi = csrf.mie_msie == 1 && msipIn;
+  Bool mti = csrf.mie_mtie == 1 && mtipIn;
+  Bool mei = csrf.mie_meie == 1 && meipIn;
+  // S 级软件中断的来源就是 mip.SSIP 那一位本身，没有外来的线
+  Bool ssi = cfg.smode && csrf.mie_ssie == 1 && csrf.mip_ssip == 1
+             && csrf.mideleg[1] == 1;
+
+  Bool irqPending = (mEn && (msi || mti || mei)) || (sEn && ssi);
+
+  // 链接处只看上一拍锁下来的这份。直接读 irqPending 会让写 CSR 那条规则
+  // 同时碰 mstatus 那个 CReg 的两个端口（G0004）——CSR 写本来就在改使能位。
+  // 晚一拍取中断是合法的：中断本来就异步，多退休一条指令不改变语义。
+  Reg#(Bool) irqSeen <- mkConfigReg(False);
+
+  Bit#(31) irqCode = (mEn && mei) ? 11 : (mEn && mti) ? 7
+                   : (mEn && msi) ? 3 : 1;
 
   // 两件事必须分成两条规则：驱动没有存储的 CSR 要排在 CSR 访问**之前**
   // （访问要读它们），更新计数器要排在**之后**（访问读的是旧值）。
   // 写一条里就首尾相接，bsc 判 CSR 规则永不触发。
   rule platform;
-    csrf.misa_in(32'h4000_0100 | (cfg.mul ? 32'h0000_1000 : 0));   // RV32I[M]
+    csrf.misa_in(32'h4000_0100 | (cfg.mul ? 32'h0000_1000 : 0)
+                 | (cfg.smode ? 32'h0014_0000 : 0));   // RV32I[M][SU]
     csrf.mvendorid_in(0);
     csrf.marchid_in(0);
     csrf.mhartid_in(hid);
@@ -143,6 +182,10 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
     hid <= hidIn;
   endrule
 
+  rule latchIrq;
+    irqSeen <= irqPending;
+  endrule
+
   rule tick;
     csrf.mcycle_in(csrf.mcycle + 1);
     if (retire) csrf.minstret_in(csrf.minstret + 1);
@@ -150,21 +193,56 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
 
   // 陷入的现场保存与跳转。写 pc 与 st 由调用处统一做，这里只碰 CSR。
   function Action enterTrap(Bit#(31) code, Bool isIrq, Bit#(32) tval) = action
-    csrf.mepc_in(pc);
-    csrf.mcause_code_in(code);
-    csrf.mcause_intr_in(isIrq ? 1 : 0);
-    csrf.mtval_in(tval);
-    csrf.mstatus_mpie_in(csrf.mstatus_mie);
-    csrf.mstatus_mie_in(0);
-    csrf.mstatus_mpp_in(3);
+    if (deleg(code, isIrq)) begin
+      csrf.sepc_in(pc);
+      csrf.scause_code_in(code);
+      csrf.scause_intr_in(isIrq ? 1 : 0);
+      csrf.stval_in(tval);
+      csrf.mstatus_spie_in(csrf.mstatus_sie);
+      csrf.mstatus_sie_in(0);
+      csrf.mstatus_spp_in(priv[0]);
+      setPriv(2'b01);
+    end else begin
+      csrf.mepc_in(pc);
+      csrf.mcause_code_in(code);
+      csrf.mcause_intr_in(isIrq ? 1 : 0);
+      csrf.mtval_in(tval);
+      csrf.mstatus_mpie_in(csrf.mstatus_mie);
+      csrf.mstatus_mie_in(0);
+      csrf.mstatus_mpp_in(priv);
+      setPriv(2'b11);
+    end
   endaction;
 
   function Bit#(32) trapTarget(Bit#(31) code, Bool isIrq);
-    Bit#(32) base = {csrf.mtvec_base, 2'b00};
+    Bool s = deleg(code, isIrq);
+    Bit#(32) base = s ? {csrf.stvec_base, 2'b00} : {csrf.mtvec_base, 2'b00};
+    Bit#(2)  mode = s ? csrf.stvec_mode : csrf.mtvec_mode;
     // 向量模式下中断按编号偏移，异常一律走基址
-    return (csrf.mtvec_mode == 1 && isIrq)
-         ? base + (zeroExtend(code) << 2) : base;
+    return (mode == 1 && isIrq) ? base + (zeroExtend(code) << 2) : base;
   endfunction
+
+  Bit#(32) pfAddr  = pc + 4;
+  Bool     needNow = st == Fetch && !halted && !irqPending;
+  // 除法一位一拍要磨三十几拍，那几拍里不举手——请求举着也没处放，
+  // 只是白占总线仲裁。末拍再举，链接照样接得上。
+  Bool     wantPf  = st != Fetch && !halted && (st != Muls || md.done);
+
+  // 一条指令的最后一拍都走这里：顺序下一条这拍已经取回来了就直接接上，
+  // 省掉回 Fetch 的那一拍。访存、乘除、读写 CSR 的末拍 pc 还停在本条上，
+  // pfAddr 正好是下一条；跳走了地址对不上，照旧回 Fetch 重取。
+  function Action advance(Bit#(32) nPc) = action
+    // 待决中断必须让链接断开：链接跳过的正是 Fetch 那一拍，而中断只在那里
+    // 检查。不断开的话一段直线代码能把中断拖到段尾，S 软件中断的用例就是
+    // 这么暴露出来的（自己写 sip.SSIP，却先把后面两条执行完了）。
+    Bool chain = iRspV && (pfAddr == nPc) && !irqSeen;
+    if (chain) begin
+      instr <= iRspX.rdata;
+      dec   <= decode(iRspX.rdata, cfg.mul);
+    end
+    pc <= nPc;
+    st <= chain ? Exec : Fetch;
+  endaction;
 
   rule doTrapEntry (st == Fetch && !halted && irqPending);
     enterTrap(irqCode, True, 0);
@@ -225,13 +303,19 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
         dValid <= True;
         nSt = Mem; nPc = pc; bump = False;
       end
-      Csr: begin
-        nSt = CsrRd; nPc = pc; bump = False;
-      end
+      Csr: if (priv < d.csr[9:8]) begin
+             // 地址的第 9、8 位写明了这个 CSR 属于哪一级，够不着就是非法指令
+             enterTrap(2, False, instr);
+             nPc = trapTarget(2, False);
+           end else begin
+             nSt = CsrRd; nPc = pc; bump = False;
+           end
       Sys: begin
+        // ecall 的编号说的是「从哪一级喊的」：8 用户、9 监管者、11 机器
+        Bit#(31) ec = (priv == 2'b00) ? 8 : (priv == 2'b01) ? 9 : 11;
         if (d.imm == 32'h000) begin                        // ecall
-          enterTrap(11, False, 0);
-          nPc = trapTarget(11, False);
+          enterTrap(ec, False, 0);
+          nPc = trapTarget(ec, False);
         end else if (d.imm == 32'h001) begin               // ebreak
           enterTrap(3, False, 0);
           nPc = trapTarget(3, False);
@@ -239,6 +323,15 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
           nPc = csrf.mepc;
           csrf.mstatus_mie_in(csrf.mstatus_mpie);
           csrf.mstatus_mpie_in(1);
+          setPriv(csrf.mstatus_mpp);
+          // 返回后 mpp 退到实现支持的最低级：有 U 就退到 U，没有就还是 M
+          csrf.mstatus_mpp_in(cfg.smode ? 2'b00 : 2'b11);
+        end else if (cfg.smode && d.imm == 32'h102) begin  // sret
+          nPc = csrf.sepc;
+          csrf.mstatus_sie_in(csrf.mstatus_spie);
+          csrf.mstatus_spie_in(1);
+          setPriv(zeroExtend(csrf.mstatus_spp));
+          csrf.mstatus_spp_in(0);
         end
         // fence 与 wfi 当空操作：本实现顺序执行、不休眠
       end
@@ -248,15 +341,17 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
       end
     endcase
 
-    pc <= nPc;
-    st <= nSt;
+    if (nSt == Fetch) advance(nPc);
+    else begin
+      pc <= nPc;
+      st <= nSt;
+    end
     if (bump) retire.send();
   endrule
 
   rule doMul (st == Muls && md.done);
     wr(dec.rd, md.result);
-    pc <= pc + 4;
-    st <= Fetch;
+    advance(pc + 4);
     retire.send();
   endrule
 
@@ -275,8 +370,7 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
                     endcase;
       wr(d.rd, v);
     end
-    pc <= pc + 4;
-    st <= Fetch;
+    advance(pc + 4);
     retire.send();
   endrule
 
@@ -295,9 +389,12 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
     // rs1 为 0 的 set/clear 是纯读，不该产生写副作用
     Bool doWrite = (d.csrOp == CsrRw) || (d.csrImm ? d.imm != 0 : d.rs1 != 0);
     csrWr <= doWrite;
-    st    <= doWrite ? CsrWr : Fetch;
-    if (!doWrite) begin
+    if (doWrite) st <= CsrWr;
+    else begin
+      // CSR 访问之后不链接，规规矩矩过一趟 Fetch。写 CSR 改的正是中断使能与
+      // 待决位，而锁存下来的那份还是旧的；链过去就会把刚开起来的中断漏掉。
       pc <= pc + 4;
+      st <= Fetch;
       retire.send();
     end
   endrule
@@ -311,9 +408,10 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
   endrule
 
   interface RegManager imem;
-    method Bool valid = st == Fetch && !halted && !irqPending;
-    method RegReq#(32, 32) req = RegReq { addr: pc, write: False,
-                                          wdata: 0, wstrb: 4'hF };
+    method Bool valid = needNow || wantPf;
+    method RegReq#(32, 32) req = RegReq { addr: needNow ? pc : pfAddr,
+                                          write: False, wdata: 0, wstrb: 4'hF };
+
     method Action ready(Bool v); iRdy._write(v); endmethod
     method Action resp(Bool v, RegRsp#(32) x);
       iRspV._write(v);

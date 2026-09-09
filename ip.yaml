@@ -28,27 +28,21 @@ features:
     default: true
     desc: M 扩展。乘法四周期、除法逐位，见 E28
     area:
-      fixed: 7381.639999999999
+      fixed: 6786.080000000002
   smode:
     type: bool
     default: false
-    desc: 监管者态。E27 证过特权级范围是一个开关而不是架构分岔
+    desc: 监管者态。委托、S 的陷入现场与 sret；E27 证过特权级范围是一个开关而不是架构分岔
     area:
-      fixed: 0.0
+      fixed: 3316.5999999999985
 test:
   unused:
-  - mstatus_sie
-  - mstatus_spie
-  - mstatus_spie_in
-  - mstatus_spp
-  - mstatus_spp_in
-  - mie_ssie
   - mie_stie
   - mie_seie
-  - mip_ssip_in
   - mip_stip_in
   - mip_seip_in
   - mscratch
+  - sscratch
 emit:
 - kind: bsv
   package: Hart
@@ -72,7 +66,7 @@ deps:
   hwcore: ^0.1
 area:
   base:
-    fixed: 36303.12
+    fixed: 37367.96
   margin: 0.0
   model: measured-grid
   error:
@@ -84,22 +78,22 @@ area:
   - at:
       mul: false
       smode: false
-    um2: 36303.12
+    um2: 37367.96
   - at:
       mul: false
       smode: true
-    um2: 35939.96
+    um2: 40684.56
   - at:
       mul: true
       smode: false
-    um2: 43684.76
+    um2: 44154.04
   - at:
       mul: true
       smode: true
-    um2: 42973.28
+    um2: 47203.8
   corner:
     tool: ecc
     pdk: ics55
     freq_mhz: 100
     measured: '2026-09-09'
-    gen_digest: sha256:70b404ab7c121967
+    gen_digest: sha256:376f6680758e6dfe

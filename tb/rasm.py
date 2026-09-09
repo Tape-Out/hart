@@ -42,6 +42,13 @@ def asm_one(line: str, pc: int, labels: dict[str, int]) -> int:
         return R[s]
 
     def imm(s):
+        # hi()/lo() 取标签的绝对地址：陷入向量要的是地址本身，不是相对量
+        if s.startswith(('hi(', 'lo(')) and s.endswith(')'):
+            v = labels[s[3:-1]]
+            if s[0] == 'h':
+                return (v + 0x800) >> 12
+            v &= 0xFFF
+            return v - 0x1000 if v & 0x800 else v
         return labels[s] - pc if s in labels else int(s, 0)
 
     if op in RTYPE:
@@ -70,9 +77,9 @@ def asm_one(line: str, pc: int, labels: dict[str, int]) -> int:
             | (reg(a[1]) << 20) | (reg(a[0]) << 15) | (BRANCH[op] << 12) \
             | (((v >> 1) & 0xF) << 8) | (((v >> 11) & 1) << 7) | 0x63
     if op == "lui":
-        return (_u(int(a[1], 0), 20) << 12) | (reg(a[0]) << 7) | 0x37
+        return (_u(imm(a[1]), 20) << 12) | (reg(a[0]) << 7) | 0x37
     if op == "auipc":
-        return (_u(int(a[1], 0), 20) << 12) | (reg(a[0]) << 7) | 0x17
+        return (_u(imm(a[1]), 20) << 12) | (reg(a[0]) << 7) | 0x17
     if op == "jal":
         v = _u(imm(a[1]), 21)
         return (((v >> 20) & 1) << 31) | (((v >> 1) & 0x3FF) << 21) \
@@ -92,6 +99,8 @@ def asm_one(line: str, pc: int, labels: dict[str, int]) -> int:
         return 0x00100073
     if op == "mret":
         return 0x30200073
+    if op == "sret":
+        return 0x10200073
     if op == "nop":
         return 0x13
     raise ValueError(f"不认识的指令 {op}")
