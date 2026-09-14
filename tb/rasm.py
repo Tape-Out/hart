@@ -103,6 +103,8 @@ def asm_one(line: str, pc: int, labels: dict[str, int]) -> int:
         return 0x10200073
     if op == "sfence.vma":
         return 0x12000073
+    if op == "wfi":
+        return 0x10500073
     if op == "nop":
         return 0x13
     raise ValueError(f"不认识的指令 {op}")

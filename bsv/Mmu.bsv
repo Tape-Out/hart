@@ -29,7 +29,7 @@ interface MmuIfc;
   interface RegTarget#(32, 32)  up;     // 面向流水线
   interface RegManager#(32, 32) down;   // 面向存储
   (* always_ready, always_enabled *)
-  method Action ctl(Bit#(32) satp, Bit#(2) priv);
+  method Action ctl(Bit#(32) satp, Bit#(2) priv, Bool sum, Bool mxr);
   (* always_ready, always_enabled *) method Action fence(Bool f);
   // 这一拍答复的那个错是缺页（而不是总线上的访问错）。两者的异常号不同，
   // 所以必须分得开——一位就够，因为一拍只答一笔。
@@ -42,6 +42,8 @@ module mkMmu#(Bool isFetch)(MmuIfc);
   Wire#(Bit#(32)) satpW  <- mkBypassWire;
   Wire#(Bit#(2))  privW  <- mkBypassWire;
   Wire#(Bool)     fenceW <- mkBypassWire;
+  Wire#(Bool)     sumW   <- mkBypassWire;
+  Wire#(Bool)     mxrW   <- mkBypassWire;
 
   Wire#(Bool)           upV <- mkBypassWire;
   Wire#(RegReq#(32, 32)) upR <- mkBypassWire;
@@ -61,13 +63,15 @@ module mkMmu#(Bool isFetch)(MmuIfc);
   Bit#(12) off = upR.addr[11:0];
   Maybe#(Ent) hit = tlb.lookup(vpn);
 
-  // 权限：取指要 X，写要 W，读要 R。用户页在监管者态下不可访问——本版没有
-  // sstatus.SUM，所以是硬拦；A 没置上、或者写而 D 没置上，一律缺页（规范允许
-  // 的两种做法里较简单的那一种，4.3.2）。
+  // 权限：取指要 X，写要 W，读要 R，MXR 开着时可执行的页也读得出（3.1.6.3）。
+  // U 页只给 U 态；SUM 开着时 S 态也能读写，但无论 SUM 如何都不许执行（4.3.1）。
+  // A 没置上、或者写而 D 没置上，一律缺页（规范允许的两种做法之一，4.3.2）。
   function Bool permOk(Ent e);
     Bool kind = isFetch ? (e.flags[3] == 1)
-              : (upR.write ? (e.flags[2] == 1) : (e.flags[1] == 1));
-    Bool lvl  = (privW == 2'b00) ? (e.flags[4] == 1) : (e.flags[4] == 0);
+              : (upR.write ? (e.flags[2] == 1)
+                           : (e.flags[1] == 1 || (mxrW && e.flags[3] == 1)));
+    Bool lvl  = (privW == 2'b00) ? (e.flags[4] == 1)
+              : (e.flags[4] == 0 || (sumW && !isFetch));
     Bool acc  = e.flags[6] == 1 && (!upR.write || e.flags[7] == 1);
     return kind && lvl && acc;
   endfunction
@@ -185,9 +189,11 @@ module mkMmu#(Bool isFetch)(MmuIfc);
     endmethod
   endinterface
 
-  method Action ctl(Bit#(32) satp, Bit#(2) priv);
+  method Action ctl(Bit#(32) satp, Bit#(2) priv, Bool sum, Bool mxr);
     satpW._write(satp);
     privW._write(priv);
+    sumW._write(sum);
+    mxrW._write(mxr);
   endmethod
   method Action fence(Bool f); fenceW._write(f); endmethod
   method Bool pageFault = faultR && pfR;

@@ -19,6 +19,14 @@ regs:
       - { name: mpie, bits: "7:7",   sw: rw, hw: rw, reset: 0 }
       - { name: spp,  bits: "8:8",   sw: rw, hw: rw, reset: 0, feature: smode }
       - { name: mpp,  bits: "12:11", sw: rw, hw: rw, reset: 3 }
+      # 这六位在「不支持 S 态」或「不支持 U 态」时才许恒为零（3.1.6.3、3.1.6.5）。
+      # 我们的 U 态与 S 态同开同关，所以都跟着 smode；SUM 另要翻译在，跟着 mmu。
+      - { name: mprv, bits: "17:17", sw: rw, hw: rw, reset: 0, feature: smode }
+      - { name: sum,  bits: "18:18", sw: rw, hw: r,  reset: 0, feature: mmu }
+      - { name: mxr,  bits: "19:19", sw: rw, hw: r,  reset: 0, feature: smode }
+      - { name: tvm,  bits: "20:20", sw: rw, hw: r,  reset: 0, feature: smode }
+      - { name: tw,   bits: "21:21", sw: rw, hw: r,  reset: 0, feature: smode }
+      - { name: tsr,  bits: "22:22", sw: rw, hw: r,  reset: 0, feature: smode }
 
   - name: misa
     offset: 0x301
@@ -110,6 +118,8 @@ regs:
       - { name: sie,  bits: "1:1", sw: rw, hw: r,  reset: 0 }
       - { name: spie, bits: "5:5", sw: rw, hw: rw, reset: 0 }
       - { name: spp,  bits: "8:8", sw: rw, hw: rw, reset: 0 }
+      - { name: sum,  bits: "18:18", sw: rw, hw: r, reset: 0, feature: mmu }
+      - { name: mxr,  bits: "19:19", sw: rw, hw: r, reset: 0 }
 
   - name: sie
     offset: 0x104

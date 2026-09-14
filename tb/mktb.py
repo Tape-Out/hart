@@ -113,6 +113,31 @@ SMODE = [
 # 一次软件写起来的 S 软件中断（写 sip.SSIP）、
 # 以及一次**硬件送来的**——SSWI 写 SETSSIP 只送一个边沿，
 # 由 mip.SSIP 那一位把它记住。没有这一条，`ssip_set` 那根线接没接上看不出来。
+# 测试程序进 M 态的门是 ebreak（没委托），第几次记在 mscratch。
+# 第一次：置 MPRV；开着翻译时读两次，MPP 为 S 按 S 翻译、MPP 为 M 不翻译；再开 TVM、TW、TSR。
+# MPRV 故意留着，让 mret 回 S 时去清。第二次：读回 MPRV 必须是零，三位关回去。
+MBRK = [
+    "mbrk:",
+    "  csrrs t2, 0x340, zero",
+    "  bne  t2, zero, mbrk2",
+    "  addi t2, zero, 1",
+    "  csrrw zero, 0x340, t2",
+    *li("t2", 0x2_0000), "  csrrs zero, 0x300, t2",
+    *([*li("a5", 0x4000_0040), "  lw   t2, 0(a5)", "  sw   t2, 0(a0)",
+       *li("t2", 0x1800), "  csrrs zero, 0x300, t2",
+       "  lw   t2, 0(a5)", "  sw   t2, 0(a0)",
+       *li("t2", 0x1000), "  csrrc zero, 0x300, t2"] if mmu else []),
+    *li("t2", 0x70_0000), "  csrrs zero, 0x300, t2",
+    "  jal  zero, mskip",
+    "mbrk2:",
+    "  csrrs t2, 0x300, zero",
+    "  srli t2, t2, 17",
+    "  andi t2, t2, 1",
+    "  sw   t2, 0(a0)",
+    *li("t2", 0x70_0000), "  csrrc zero, 0x300, t2",
+    "  jal  zero, mskip",
+]
+
 DELEG = [
   "  lui  t2, hi(mhand)",
   "  addi t2, t2, lo(mhand)",
@@ -161,12 +186,16 @@ DELEG = [
   "  sret",
 "mhand:",
   "  csrrs t2, 0x342, zero",       # mcause
+  "  addi t3, zero, 3",
+  "  beq  t2, t3, mbrk",           # ebreak 是进 M 态的门，不记号
   "  addi t2, t2, 0x100",          # 打个记号。不打的话委托没生效也看不出来——
   "  sw   t2, 0(a0)",              # M 手里的 mcause 与 S 手里的 scause 同是 9
+"mskip:",
   "  csrrs t2, 0x341, zero",
   "  addi t2, t2, 4",
   "  csrrw zero, 0x341, t2",
   "  mret",
+  *MBRK,
 "sdone:",
   "  addi t2, zero, 88",
   "  sw   t2, 0(a0)",             # 软件那条走完了
@@ -193,6 +222,8 @@ MMU = [
     *li("t2", 0xC000_4043), "  sw   t2, 16(a1)",
     *li("t2", 0x2000_4047), "  sw   t2, 20(a1)",
     *li("t2", 0x2000_4083), "  sw   t2, 24(a1)",
+    *li("t2", 0x2000_405B), "  sw   t2, 28(a1)",   # 7：U X R，SUM 开着也不许 S 态执行
+    *li("t2", 0x2000_4049), "  sw   t2, 32(a1)",   # 8：只可执行，MXR 开着才读得出
     *li("t2", 0x8008_0020), "  csrrw zero, 0x180, t2",   # satp：Sv32，根在 0x8002_0000
     "  sfence.vma",
     *li("a2", 0x8001_0040), *li("a3", 0x4000_0040), *li("a4", 0x8001_2040),
@@ -215,6 +246,14 @@ MMU = [
     *li("a5", 0x4000_1000), "  jalr ra, 0(a5)",
     *li("a5", 0x4000_4040), "  lw   t2, 0(a5)",
     *li("a5", 0x4040_0040), "  lw   t2, 0(a5)",
+    *li("t2", 0x40000), "  csrrs zero, 0x100, t2",
+    *li("a5", 0x4000_3040), "  lw   t2, 0(a5)", "  sw   t2, 0(a0)",
+    *li("a5", 0x4000_7000), "  jalr ra, 0(a5)",
+    *li("t2", 0x40000), "  csrrc zero, 0x100, t2",
+    *li("a5", 0x4000_8040), "  lw   t2, 0(a5)",
+    *li("t2", 0x80000), "  csrrs zero, 0x100, t2",
+    "  lw   t2, 0(a5)", "  sw   t2, 0(a0)",
+    *li("t2", 0x80000), "  csrrc zero, 0x100, t2",
 ]
 MMU_EXP = [0x11111111, 0x22222222,       # 经虚地址读到实地址写的，反过来也一样
            0x22222222, 0x33333333,       # sfence 前是旧翻译，之后是新的
@@ -228,7 +267,9 @@ MMU_EXP = [0x11111111, 0x22222222,       # 经虚地址读到实地址写的，�
            12, 0x40001000,               # 跳进不可执行页：取指缺页
            # 物理地址超出 32 位、走表时读页表项本身出错：规范要的是访问错（5），
            # 不是缺页。访问错没委托，落在 M 手里记 0x105
-           0x105, 0x105]
+           0x105, 0x105,
+           # SUM 开着 S 态读得出 U 页、仍不许执行；只可执行的页 MXR 开着才读得出
+           0x22222222, 12, 0x40007000, 13, 0x40008040, 0x22222222]
 
 # 接在 77 之后、sdone 之前：最后一项要留给硬件 SSWI 的边沿，测试台按检查计数送它
 if mmu:
@@ -270,10 +311,16 @@ PRIV = [
     "  sfence.vma",
     "  mret",
 ]
+# 两次 ebreak 之间四条，S 态执行都得是非法指令：TVM 下碰 satp、执行 sfence.vma，
+# TSR 下执行 sret，TW 下执行 wfi
+MACH = ["  ebreak", "  csrrs t2, 0x180, zero", "  sfence.vma", "  sret", "  wfi", "  ebreak"]
+MACH_EXP = ([0x33333333, 0] if mmu else []) + [0x102] * 4 + [0]
+i = DELEG.index("  mret")
+DELEG[i:i] = ["  csrrw zero, 0x340, zero"]
 i = DELEG.index("  jal  zero, sdone")
-DELEG[i:i] = PRIV
+DELEG[i:i] = MACH + PRIV
 j = DELEG_EXP.index(88)
-DELEG_EXP[j:j] = [0x102] * 4
+DELEG_EXP[j:j] = MACH_EXP + [0x102] * 4
 
 SRC = HEAD + (MEXT if mul else []) + TAIL + SMODE + (DELEG if smode else [])
 SRC += ["done:", "  jal  zero, done"]

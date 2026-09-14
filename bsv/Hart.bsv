@@ -157,6 +157,9 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
   endfunction
 
   Bit#(2) priv = cfg.smode ? privR : 2'b11;
+  // S 态里被 M 截获的三件事（3.1.6.5）：TVM 管 satp 与 sfence.vma，TSR 管 sret
+  Bool tvmTrap = cfg.smode && priv == 2'b01 && csrf.mstatus_tvm == 1;
+  Bool tsrTrap = cfg.smode && priv == 2'b01 && csrf.mstatus_tsr == 1;
 
   function Action setPriv(Bit#(2) v) = action
     if (cfg.smode) privR <= v;
@@ -361,7 +364,7 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
         dValid <= True;
         nSt = Mem; nPc = pc; bump = False;
       end
-      Csr: if (priv < d.csr[9:8]) begin
+      Csr: if (priv < d.csr[9:8] || (tvmTrap && d.csr == 'h180)) begin
              // 地址的第 9、8 位写明了这个 CSR 属于哪一级，够不着就是非法指令
              enterTrap(2, False, instr);
              nPc = trapTarget(2, False);
@@ -382,22 +385,26 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
           csrf.mstatus_mie_in(csrf.mstatus_mpie);
           csrf.mstatus_mpie_in(1);
           setPriv(csrf.mstatus_mpp);
+          if (csrf.mstatus_mpp != 2'b11) csrf.mstatus_mprv_in(0);
           // 返回后 mpp 退到实现支持的最低级：有 U 就退到 U，没有就还是 M
           csrf.mstatus_mpp_in(cfg.smode ? 2'b00 : 2'b11);
-        end else if (cfg.smode && d.imm == 32'h102 && priv != 2'b00) begin  // sret
+        end else if (cfg.smode && d.imm == 32'h102 && priv != 2'b00 && !tsrTrap) begin  // sret
           nPc = csrf.sepc;
           csrf.mstatus_sie_in(csrf.mstatus_spie);
           csrf.mstatus_spie_in(1);
           setPriv(zeroExtend(csrf.mstatus_spp));
+          // 回到比 M 低的特权级就清 MPRV（3.1.6.3）；sret 总是回到比 M 低的级
+          csrf.mstatus_mprv_in(0);
           csrf.mstatus_spp_in(0);
-        end else if (cfg.smode && d.imm[11:5] == 7'b0001001 && priv != 2'b00) begin  // sfence.vma
+        end else if (cfg.smode && d.imm[11:5] == 7'b0001001 && priv != 2'b00 && !tvmTrap) begin  // sfence.vma
           // 本版不分 ASID 也不分地址，一律整表清掉——规范允许比要求更狠地清
           // （特权规范 4.2.1：实现可以把 sfence.vma 当成清空全部翻译缓存）。
           // 没有 mmu 就没有东西可清，指令本身照样合法。
           if (cfg.mmu) sfenceP.send();
-        end else if (d.imm == 32'h105) begin
+        end else if (d.imm == 32'h105 && !(cfg.smode && priv != 2'b11 && csrf.mstatus_tw == 1)) begin
           // wfi 当空操作：本实现顺序执行、不休眠。立刻返回算「有界时间内完成」，
-          // 所以 U 态执行它也不必判非法（特权规范 3.3.3）。
+          // 所以 TW 为零时 U 态执行它也不必判非法（3.3.3）；TW 置上时超时上限取 0，
+          // 低于 M 的特权级一律非法（3.1.6.5 明写上限可以恒为 0）。
         end else begin
           // 够不着的特权指令与不认识的 SYSTEM 指令一律非法。原来落空成空操作：
           // U 态一条 mret 就跳到 mepc，还把特权级设成 mpp。
@@ -522,8 +529,12 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
 
     rule mmuCtl;
       Bit#(32) satp = {csrf.satp_mode, csrf.satp_asid, csrf.satp_ppn};
-      imu.ctl(satp, priv);
-      dmu.ctl(satp, priv);
+      // MPRV 只改读写的有效特权级，取指照旧（3.1.6.3）
+      Bit#(2) dpriv = (csrf.mstatus_mprv == 1) ? csrf.mstatus_mpp : priv;
+      Bool sum = csrf.mstatus_sum == 1;
+      Bool mxr = csrf.mstatus_mxr == 1;
+      imu.ctl(satp, priv, sum, mxr);
+      dmu.ctl(satp, dpriv, sum, mxr);
       imu.fence(sfenceR);
       dmu.fence(sfenceR);
     endrule
