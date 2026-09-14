@@ -35,10 +35,21 @@ features:
     desc: 监管者态。委托、S 的陷入现场与 sret；E27 证过特权级范围是一个开关而不是架构分岔
     area:
       fixed: 4070.3600000000006
+  mmu:
+    type: bool
+    default: false
+    desc: Sv32 地址翻译。16 条全相联 TLB（E29 定案）加两级页表遍历器；没有监管者态就没有它
+    depends: [smode]
+    area:
+      fixed: 27004.04
 test:
   # 访存口在收到响应之前一直顶着 valid 与 req 不动，「响应即已被接收」，所以不看 ready
   deadread:
   - dRdy
+  # MMU 下游同理，而且它必须不看：ready 一旦牵着下游，「上游的请求 -> 下游的
+  # valid -> 下游的 ready -> 上游的 ready」就绕成一个环，bsc 会把接线那条规则
+  # 整条丢掉（G0009）。契约原文写明一次一笔的发起方可以不看 ready。
+  - dnRdy
   unused:
   - mie_stie
   - mie_seie
@@ -71,34 +82,50 @@ deps:
   hwcore: ^0.1
 area:
   base:
-    fixed: 37145.92
+    fixed: 36965.6
   margin: 0.0
   model: measured-grid
   error:
     bound: 0.0
     sign: exact
-    note: two boolean knobs make four combinations, and all four were measured, 
-      so every configuration is a table lookup and nothing is ever extrapolated
+    note: three boolean knobs with mmu depending on smode leave six valid 
+      combinations, and all six are measured, so every configuration is a table 
+      lookup and nothing is ever extrapolated
   measured:
   - at:
       mul: false
       smode: false
-    um2: 37487.8
+      mmu: false
+    um2: 36965.6
   - at:
       mul: false
       smode: true
-    um2: 41136.48
+      mmu: false
+    um2: 40821.48
+  - at:
+      mul: false
+      smode: true
+      mmu: true
+    um2: 67825.52
   - at:
       mul: true
       smode: false
-    um2: 44482.2
+      mmu: false
+    um2: 44602.32
   - at:
       mul: true
       smode: true
-    um2: 48415.92
+      mmu: false
+    um2: 48719.44
+  - at:
+      mul: true
+      smode: true
+      mmu: true
+    um2: 73027.64
   corner:
     tool: ecc
     pdk: ics55
     freq_mhz: 100
-    measured: '2026-09-10'
-    gen_digest: sha256:1662e1f9d453fb53
+    measured: '2026-09-14'
+    toolchain: bsc 2026.01 · yosys 0.68+195 · ecc 0.1.0a11
+    gen_digest: sha256:573cc93580407854

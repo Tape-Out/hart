@@ -131,6 +131,17 @@ regs:
       - { name: stip, bits: "5:5", sw: r, hw: w, volatile: true }
       - { name: seip, bits: "9:9", sw: r, hw: w, volatile: true }
 
+  # Sv32：MODE 一位、ASID 九位、根页表的物理页号二十二位（特权规范 4.1.11）。
+  # ASID 收下但不用——本版 sfence 一律整表清掉，见 notes/规范对照/hart-sv32.md。
+  - name: satp
+    offset: 0x180
+    desc: supervisor address translation and protection
+    feature: mmu
+    fields:
+      - { name: ppn,  bits: "21:0",  sw: rw, hw: r, reset: 0 }
+      - { name: asid, bits: "30:22", sw: rw, hw: r, reset: 0 }
+      - { name: mode, bits: "31:31", sw: rw, hw: r, reset: 0 }
+
   - name: stvec
     offset: 0x105
     desc: supervisor trap vector base and mode

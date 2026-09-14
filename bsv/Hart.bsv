@@ -6,6 +6,7 @@ import RegIf::*;
 import Decode::*;
 import Muldiv::*;
 import HartRegs::*;
+import Mmu::*;
 
 // RV32I[M] 核心，M 态必备、S/U 两态由 smode 开关决定。三级：取指 / 译码执行 / 写回，**停顿而不旁路**。
 //
@@ -24,6 +25,7 @@ import HartRegs::*;
 typedef struct {
   Bool mul;
   Bool smode;
+  Bool mmu;
 } HartCfg;
 
 typedef enum { Fetch, Exec, Mem, Muls, CsrRd, CsrWr }
@@ -63,7 +65,7 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
     // 生成的包装层照统一的形状写，这两条 proviso 把它们钉在唯一合法的值上。
     provisos (Add#(aw, 0, 12), Add#(dw, 0, 32));
 
-  HartRegsIfc#(aw, dw) csrf <- mkHartRegs(HartRegsCfg { smode: cfg.smode });
+  HartRegsIfc#(aw, dw) csrf <- mkHartRegs(HartRegsCfg { smode: cfg.smode, mmu: cfg.mmu });
   MuldivIfc md <- (cfg.mul ? mkMuldiv : mkMuldivNone);
 
   Vector#(32, Reg#(Bit#(32))) rf <- replicateM(mkConfigReg(0));
@@ -99,6 +101,17 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
   Wire#(RegRsp#(32)) iRspX <- mkBypassWire;
   Wire#(Bool)        dRspV <- mkBypassWire;
   Wire#(RegRsp#(32)) dRspX <- mkBypassWire;
+
+  // 流水线这一侧包成契约的形状，好让 MMU 用现成的 mkPipe 插进中间。
+  // MMU 上游是**会停顿的目标**、下游是发起方，正是这两个契约的用处。
+  PulseWire sfenceP <- mkPulseWire;
+  // 清表的脉冲要先落一拍再交给 MMU。直接给的话：执行那一级发线、MMU 的配置
+  // 规则读线，于是配置要排在执行之后；而配置写的线又喂给下游的请求，要排在
+  // 取指之前——绕一圈闭合成环（G0009），bsc 直接把规则丢掉。
+  // 晚一拍无妨：那条指令本来就要走完，下一次取指才用得上新的表。
+  Reg#(Bool) sfenceR <- mkReg(False);
+  Wire#(Bool) iPf <- mkDWire(False);
+  Wire#(Bool) dPf <- mkDWire(False);
 
   Wire#(Bool) msipIn <- mkBypassWire;
   Wire#(Bool) ssipSetIn <- mkBypassWire;
@@ -261,7 +274,7 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
     // 待决中断必须让链接断开：链接跳过的正是 Fetch 那一拍，而中断只在那里
     // 检查。不断开的话一段直线代码能把中断拖到段尾，S 软件中断的用例就是
     // 这么暴露出来的（自己写 sip.SSIP，却先把后面两条执行完了）。
-    Bool chain = iRspV && (rspAd == nPc) && !irqSeen;
+    Bool chain = iRspV && !iRspX.err && (rspAd == nPc) && !irqSeen;
     if (chain) begin
       instr <= iRspX.rdata;
       dec   <= decode(iRspX.rdata, cfg.mul);
@@ -287,9 +300,18 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
   // 响应回来了才走。没回来就停在 Fetch，手一直举着。
   rule doFetch (st == Fetch && !halted && !irqPending && iRspV
                 && rspAd == pc);
-    instr <= iRspX.rdata;
-    dec   <= decode(iRspX.rdata, cfg.mul);
-    st    <= Exec;
+    if (iRspX.err) begin
+      // 取指答的是错。缺页与总线上的访问错异常号不同（12 与 1），
+      // MMU 那根线说的就是「这一次是缺页」。原来 err 根本没人看——
+      // 取错了的字会被当成指令解码执行。
+      Bit#(31) code = iPf ? 12 : 1;
+      enterTrap(code, False, pc);
+      pc <= trapTarget(code, False);
+    end else begin
+      instr <= iRspX.rdata;
+      dec   <= decode(iRspX.rdata, cfg.mul);
+      st    <= Exec;
+    end
   endrule
 
   rule doExec (st == Exec);
@@ -355,21 +377,33 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
         end else if (d.imm == 32'h001) begin               // ebreak
           enterTrap(3, False, 0);
           nPc = trapTarget(3, False);
-        end else if (d.imm == 32'h302) begin               // mret
+        end else if (d.imm == 32'h302 && priv == 2'b11) begin  // mret
           nPc = csrf.mepc;
           csrf.mstatus_mie_in(csrf.mstatus_mpie);
           csrf.mstatus_mpie_in(1);
           setPriv(csrf.mstatus_mpp);
           // 返回后 mpp 退到实现支持的最低级：有 U 就退到 U，没有就还是 M
           csrf.mstatus_mpp_in(cfg.smode ? 2'b00 : 2'b11);
-        end else if (cfg.smode && d.imm == 32'h102) begin  // sret
+        end else if (cfg.smode && d.imm == 32'h102 && priv != 2'b00) begin  // sret
           nPc = csrf.sepc;
           csrf.mstatus_sie_in(csrf.mstatus_spie);
           csrf.mstatus_spie_in(1);
           setPriv(zeroExtend(csrf.mstatus_spp));
           csrf.mstatus_spp_in(0);
+        end else if (cfg.smode && d.imm[11:5] == 7'b0001001 && priv != 2'b00) begin  // sfence.vma
+          // 本版不分 ASID 也不分地址，一律整表清掉——规范允许比要求更狠地清
+          // （特权规范 4.2.1：实现可以把 sfence.vma 当成清空全部翻译缓存）。
+          // 没有 mmu 就没有东西可清，指令本身照样合法。
+          if (cfg.mmu) sfenceP.send();
+        end else if (d.imm == 32'h105) begin
+          // wfi 当空操作：本实现顺序执行、不休眠。立刻返回算「有界时间内完成」，
+          // 所以 U 态执行它也不必判非法（特权规范 3.3.3）。
+        end else begin
+          // 够不着的特权指令与不认识的 SYSTEM 指令一律非法。原来落空成空操作：
+          // U 态一条 mret 就跳到 mepc，还把特权级设成 mpp。
+          enterTrap(2, False, instr);
+          nPc = trapTarget(2, False);
         end
-        // fence 与 wfi 当空操作：本实现顺序执行、不休眠
       end
       default: begin                                        // 非法指令
         enterTrap(2, False, instr);
@@ -394,20 +428,29 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
   rule doMem (st == Mem && dRspV);
     dValid <= False;
     let d = dec;
-    if (!dReq.write) begin
-      Bit#(2)  lo = memAd[1:0];
-      Bit#(32) w  = dRspX.rdata >> {lo, 3'b000};
-      Bit#(32) v  = case (d.fn3)
-                      0: signExtend(w[7:0]);
-                      1: signExtend(w[15:0]);
-                      4: zeroExtend(w[7:0]);
-                      5: zeroExtend(w[15:0]);
-                      default: w;
-                    endcase;
-      wr(d.rd, v);
+    if (dRspX.err) begin
+      // 读缺页 13、写缺页 15；总线上的访问错分别是 5 与 7。
+      // tval 要的是出错的那个**虚**地址（特权规范 4.3.2）。
+      Bit#(31) code = dReq.write ? (dPf ? 15 : 7) : (dPf ? 13 : 5);
+      enterTrap(code, False, memAd);
+      pc <= trapTarget(code, False);
+      st <= Fetch;
+    end else begin
+      if (!dReq.write) begin
+        Bit#(2)  lo = memAd[1:0];
+        Bit#(32) w  = dRspX.rdata >> {lo, 3'b000};
+        Bit#(32) v  = case (d.fn3)
+                        0: signExtend(w[7:0]);
+                        1: signExtend(w[15:0]);
+                        4: zeroExtend(w[7:0]);
+                        5: zeroExtend(w[15:0]);
+                        default: w;
+                      endcase;
+        wr(d.rd, v);
+      end
+      advance(pc + 4);
+      retire.send();
     end
-    advance(pc + 4);
-    retire.send();
   endrule
 
   // CSR 真的分两拍：一条规则里 access 只能调一次，而 csrrs/csrrc 要拿旧值算新值
@@ -443,27 +486,60 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
     retire.send();
   endrule
 
-  interface RegManager imem;
-    method Bool valid = needNow || wantPf;
-    method RegReq#(32, 32) req = RegReq { addr: askAd, write: False,
-                                          wdata: 0, wstrb: 4'hF };
+  RegManager#(32, 32) iUp = interface RegManager;
+      method Bool valid = needNow || wantPf;
+      method RegReq#(32, 32) req = RegReq { addr: askAd, write: False,
+                                            wdata: 0, wstrb: 4'hF };
+      method Action ready(Bool v); iRdy._write(v); endmethod
+      method Action resp(Bool v, RegRsp#(32) x);
+        iRspV._write(v);
+        iRspX._write(x);
+      endmethod
+    endinterface;
+  RegManager#(32, 32) dUp = interface RegManager;
+      method Bool valid = dValid;
+      method RegReq#(32, 32) req = dReq;
+      method Action ready(Bool v); dRdy._write(v); endmethod
+      method Action resp(Bool v, RegRsp#(32) x);
+        dRspV._write(v);
+        dRspX._write(x);
+      endmethod
+    endinterface;
 
-    method Action ready(Bool v); iRdy._write(v); endmethod
-    method Action resp(Bool v, RegRsp#(32) x);
-      iRspV._write(v);
-      iRspX._write(x);
-    endmethod
-  endinterface
+  // 关掉 mmu 就直通，一个门都不例化
+  RegManager#(32, 32) iOut = iUp;
+  RegManager#(32, 32) dOut = dUp;
 
-  interface RegManager dmem;
-    method Bool valid = dValid;
-    method RegReq#(32, 32) req = dReq;
-    method Action ready(Bool v); dRdy._write(v); endmethod
-    method Action resp(Bool v, RegRsp#(32) x);
-      dRspV._write(v);
-      dRspX._write(x);
-    endmethod
-  endinterface
+  if (cfg.mmu) begin
+    MmuIfc imu <- mkMmu(True);
+    MmuIfc dmu <- mkMmu(False);
+    mkPipe(iUp, imu.up);
+    mkPipe(dUp, dmu.up);
+
+    rule sfenceLatch;
+      sfenceR <= sfenceP;
+    endrule
+
+    rule mmuCtl;
+      Bit#(32) satp = {csrf.satp_mode, csrf.satp_asid, csrf.satp_ppn};
+      imu.ctl(satp, priv);
+      dmu.ctl(satp, priv);
+      imu.fence(sfenceR);
+      dmu.fence(sfenceR);
+    endrule
+
+    rule mmuFault;
+      iPf <= imu.pageFault;
+      dPf <= dmu.pageFault;
+    endrule
+
+    iOut = imu.down;
+    dOut = dmu.down;
+  end
+
+
+  interface imem = iOut;
+  interface dmem = dOut;
 
   interface HartIrq irq;
     method Action irq(Bool msip, Bool mtip, Bool meip, Bool ssipSet);
