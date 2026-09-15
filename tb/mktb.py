@@ -328,6 +328,7 @@ DELEG_EXP[j:j] = MACH_EXP + [0x102] * 4
 
 # 陷入段。mtvec 指到陷入那条的下一条，陷入之后顺着往下走，不必写处理程序。
 # 一，minstret 不算陷入的指令（特权规范 3.3.1）：两次读之间退休的只有第一次读，ecall 不算，差 1。
+#     执行拍退休的普通指令照计：读、四条 addi、读，差 5。上一条的 1 走的是 CSR 规则，只靠它查不出执行拍漏计。
 # 二，访存口一笔只碰一个字，地址不对齐就陷入：整字读低两位非零报 4，半字写奇地址报 6，tval 是地址。
 # 三，跳转目标不对齐（没有 C 扩展，IALIGN 是 32）在跳转这一条上报 0，tval 是目标。
 # 四，mepc、sepc 低两位只读零（3.1.14、4.1.7）。
@@ -344,6 +345,14 @@ TRAPS = [
     "  csrrs t4, 0xB02, zero",
     "  sub  t2, t4, t3",
     "  sw   t2, 0(a0)",              # 1
+    "  csrrs t3, 0xB02, zero",
+    "  addi t2, zero, 1",
+    "  addi t2, zero, 2",
+    "  addi t2, zero, 3",
+    "  addi t2, zero, 4",
+    "  csrrs t4, 0xB02, zero",
+    "  sub  t2, t4, t3",
+    "  sw   t2, 0(a0)",              # 5
     *vec("trap2"),
     "  lw   t2, 1(a1)",
 "trap2:",
@@ -376,7 +385,7 @@ TRAPS = [
        "  csrrs t3, 0x141, zero",
        "  sw   t3, 0(a0)"] if smode else []),
 ]
-TRAPS_EXP = [1, 4, 1, 6, 3, 0, 2, 0xFFFFFFFC] + ([0xFFFFFFFC] if smode else [])
+TRAPS_EXP = [1, 5, 4, 1, 6, 3, 0, 2, 0xFFFFFFFC] + ([0xFFFFFFFC] if smode else [])
 
 SRC = HEAD + (MEXT if mul else []) + TAIL + SMODE + TRAPS + (DELEG if smode else [])
 SRC += ["done:", "  jal  zero, done"]
