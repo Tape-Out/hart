@@ -42,6 +42,10 @@ features:
     depends: [smode]
     area:
       fixed: 27004.04
+  rvfi:
+    type: bool
+    default: false
+    desc: RVFI 提交记录端口（riscv-formal rvfi.rst），只给形式验证用；关掉时整片消掉
 test:
   # 访存口在收到响应之前一直顶着 valid 与 req 不动，「响应即已被接收」，所以不看 ready
   deadread:
@@ -57,6 +61,9 @@ test:
   - mip_seip_in
   - mscratch
   - sscratch
+  # rvfi 只在形式验证的顶层里开，进 SoC 的配置恒为关，这份面积不会上片
+  noarea:
+  - rvfi
 emit:
 - kind: bsv
   package: Hart
@@ -80,9 +87,10 @@ emit:
     type: HartPins
 deps:
   hwcore: ^0.1
+  rvfi: ^0.1
 area:
   base:
-    fixed: 34418.16
+    fixed: 37973.32
   margin: 0.0
   model: measured-grid
   error:
@@ -96,36 +104,42 @@ area:
       mul: false
       smode: false
       mmu: false
-    um2: 34418.16
+      rvfi: false
+    um2: 37973.32
   - at:
       mul: false
       smode: true
       mmu: false
-    um2: 39309.2
+      rvfi: false
+    um2: 41086.08
   - at:
       mul: false
       smode: true
       mmu: true
-    um2: 65919.84
+      rvfi: false
+    um2: 66968.72
   - at:
       mul: true
       smode: false
       mmu: false
-    um2: 44682.68
+      rvfi: false
+    um2: 44005.08
   - at:
       mul: true
       smode: true
       mmu: false
-    um2: 48380.92
+      rvfi: false
+    um2: 48682.2
   - at:
       mul: true
       smode: true
       mmu: true
-    um2: 74076.8
+      rvfi: false
+    um2: 73672.76
   corner:
     tool: ecc
     pdk: ics55
     freq_mhz: 100
-    measured: '2026-09-15'
+    measured: '2026-09-16'
     toolchain: bsc 2026.01 · yosys 0.68+195 · ecc 0.1.0a11
-    gen_digest: sha256:aa068193422cca96
+    gen_digest: sha256:a9ffca72724e750d

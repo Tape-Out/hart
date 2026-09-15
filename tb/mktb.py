@@ -7,6 +7,8 @@
 不去掉的话测的是「核怎么处理非法指令」，不是「核算得对不对」，两件事。
 `smode` 的那一段两个方向都跑：开着时 mstatus.sie 写得进去，关着时读回必须是零。
 门控写漏了的表现是「关掉了硬件还在」，只有后一半看得出来。
+陷入段不靠特权级那一段，所有配置都跑：`minstret` 不算陷入的指令。
+`rvfi` 开时另查提交记录：编号连续，前后两条的 pc 接得上，写自检口的记录与期望值对得上。
 `mmu` 开时在 S 态那一段里接着开翻译，验五件事：真的翻译了（虚实两个地址读写互通）·
 TLB 真的缓存了 · sfence.vma 真的清了 · 三种权限各拒一次 · 取指缺页回得来。
 """
@@ -25,6 +27,7 @@ k = cfg.get("knobs", {})
 mul = bool(k.get("mul", True))
 smode = bool(k.get("smode", False))
 mmu = bool(k.get("mmu", False))
+rvfi = bool(k.get("rvfi", False))
 
 
 def li(r, v):
@@ -322,14 +325,86 @@ DELEG[i:i] = MACH + PRIV
 j = DELEG_EXP.index(88)
 DELEG_EXP[j:j] = MACH_EXP + [0x102] * 4
 
-SRC = HEAD + (MEXT if mul else []) + TAIL + SMODE + (DELEG if smode else [])
+# 陷入段。mtvec 指到陷入那条的下一条，陷入之后顺着往下走，不必写处理程序。
+# 一，minstret 不算陷入的指令（特权规范 3.3.1）：两次读之间退休的只有第一次读，ecall 不算，差 1。
+def vec(label):
+    return [f"  lui  t2, hi({label})", f"  addi t2, t2, lo({label})", "  csrrw zero, 0x305, t2"]
+
+
+TRAPS = [
+    *vec("trap1"),
+    "  csrrs t3, 0xB02, zero",
+    "  ecall",
+"trap1:",
+    "  csrrs t4, 0xB02, zero",
+    "  sub  t2, t4, t3",
+    "  sw   t2, 0(a0)",              # 1
+]
+TRAPS_EXP = [1]
+
+SRC = HEAD + (MEXT if mul else []) + TAIL + SMODE + TRAPS + (DELEG if smode else [])
 SRC += ["done:", "  jal  zero, done"]
 EXPECT = (HEAD_EXP + (MEXT_EXP if mul else []) + TAIL_EXP
-          + [2 if smode else 0] + (DELEG_EXP if smode else []))
+          + [2 if smode else 0] + TRAPS_EXP + (DELEG_EXP if smode else []))
 
 prog = assemble(SRC)
 rom = "\n".join(f"      {i}: return 32'h{w:08X};" for i, w in enumerate(prog))
 exp = "\n".join(f"      {i}: return 32'h{v:08X};" for i, v in enumerate(EXPECT))
+
+# rvfi 开时测试台多出的三块。记录比访存口晚一拍出来，所以最后一项对完不马上结束，等 8 拍再收账
+RV_REG = """
+  Reg#(Bit#(64)) rvCnt <- mkReg(0);
+  Reg#(Bit#(32)) rvOut <- mkReg(0);
+  Reg#(Bit#(32)) rvPc  <- mkReg(0);
+  Reg#(Bool)     rvBad <- mkReg(False);
+  Reg#(Bool)     done  <- mkReg(False);
+  Reg#(Bit#(4))  lag   <- mkReg(0);
+""" if rvfi else ""
+
+RV_RULE = """
+  // 三条判据：编号从零连续；前后两条的 pc 接得上（从陷入进来的那条带 intr，除外）；
+  // 写自检口的记录地址、掩码、数据对得上期望值，条数等于自检项数
+  rule rvCheck (cpu.rvfi.valid);
+    let v = cpu.rvfi;
+    Bool badOrder = v.order != rvCnt;
+    Bool badPc    = rvCnt != 0 && !v.intr && v.pc_rdata != rvPc;
+    Bool toOut    = v.mem_wmask != 0 && isOut(v.mem_addr);
+    Bit#(32) want = expected(rvOut);
+    Bool badOut   = toOut && (v.mem_addr != 32'h1000_0000 || v.mem_wmask != 4'hF || v.mem_wdata != want);
+    rvCnt <= rvCnt + 1;
+    rvPc  <= v.pc_wdata;
+    if (toOut) rvOut <= rvOut + 1;
+    // 三条并列的 if 各写一次 rvBad 在 bsc 看来是并行冲突（G0004），合成一次写
+    if (badOrder || badPc || badOut) rvBad <= True;
+    if (badOrder)
+      $display("FAIL rvfi order: got %0d want %0d at pc %08h", v.order, rvCnt, v.pc_rdata);
+    if (badPc)
+      $display("FAIL rvfi record %0d: pc_rdata %08h but the previous pc_wdata was %08h",
+               v.order, v.pc_rdata, rvPc);
+    if (badOut)
+      $display("FAIL rvfi record %0d: store a=%08h mask=%b data=%08h want %08h",
+               v.order, v.mem_addr, v.mem_wmask, v.mem_wdata, want);
+  endrule
+
+  rule rvFin (done);
+    lag <= lag + 1;
+    if (lag == 8) begin
+      Bool ok = !bad && !rvBad && rvOut == fromInteger(expLen);
+      if (rvOut != fromInteger(expLen))
+        $display("FAIL rvfi: %0d records wrote the check port, want %0d", rvOut, expLen);
+      if (!ok) $display("FAILED");
+      else $display("PASS all %0d checks in %0d cycles, %0d instructions, %0d rvfi records",
+                    expLen, cyc, progLen, rvCnt);
+      $finish(ok ? 0 : 1);
+    end
+  endrule
+""" if rvfi else ""
+
+RV_FIN = "          done <= True;\n" if rvfi else """          if (bad) $display("FAILED");
+          else $display("PASS all %0d checks in %0d cycles, %0d instructions",
+                        expLen, cyc, progLen);
+          $finish(bad ? 1 : 0);
+"""
 
 (out / f"Prog{label}.bsv").write_text(f"""package Prog{label};
 
@@ -362,11 +437,12 @@ import RegFile::*;
 import ConfigReg::*;
 import RegIf::*;
 import Hart::*;
+import RvfiPins::*;
 import Prog{label}::*;
 
 // 核的自检台。判据不是「跑起来了」而是「结果对不对」：程序把每个算式的结果
 // 写到 0x1000_0000，这里按顺序对期望值。
-// 这一点：mul={mul} smode={smode} mmu={mmu}
+// 这一点：mul={mul} smode={smode} mmu={mmu} rvfi={rvfi}
 
 // 出问题时把它改成 True，每次访存都打出来。上一次逮到的就是这么逮到的：
 // addi rd, rs, -1 被译成 sub，因为立即数型借用了 funct7。
@@ -376,7 +452,8 @@ Bool trace = False;
 module mkHart{label}Tb(Empty);
   HartIfc#(12, 32) cpu <- mkHart(HartCfg {{ mul: {"True" if mul else "False"},
                                             smode: {"True" if smode else "False"},
-                                            mmu: {"True" if mmu else "False"} }});
+                                            mmu: {"True" if mmu else "False"},
+                                            rvfi: {"True" if rvfi else "False"} }});
   RegFile#(Bit#(8), Bit#(32)) ram <- mkRegFileFull;
 
   Reg#(Bit#(32)) cyc  <- mkReg(0);
@@ -385,7 +462,7 @@ module mkHart{label}Tb(Empty);
   Reg#(Bit#(32)) seen <- mkConfigReg(0);
   Reg#(Bool)     bad  <- mkReg(False);
   Reg#(Bool)     sent <- mkReg(False);
-
+{RV_REG}
   function Bool inRom(Bit#(32) a)  = a[31:28] == 4'h8 && a[17:16] == 0;
   function Bool inRam(Bit#(32) a)  = a[31:28] == 4'h8 && a[17:16] == 1;
   function Bool inRoot(Bit#(32) a) = a[31:28] == 4'h8 && a[17:16] == 2;
@@ -447,11 +524,7 @@ module mkHart{label}Tb(Empty);
         end
         seen <= seen + 1;
         if (seen + 1 == fromInteger(expLen)) begin
-          if (bad) $display("FAILED");
-          else $display("PASS all %0d checks in %0d cycles, %0d instructions",
-                        expLen, cyc, progLen);
-          $finish(bad ? 1 : 0);
-        end
+{RV_FIN}        end
       end
     end
     cpu.dmem.ready(cpu.dmem.valid);
@@ -468,8 +541,8 @@ module mkHart{label}Tb(Empty);
     cpu.pins.hartid(0);
     cpu.pins.halt(False);
   endrule
-endmodule
+{RV_RULE}endmodule
 
 endpackage
 ''', encoding="utf-8")
-print(f"  程序 {len(prog)} 条指令，自检 {len(EXPECT)} 项（mul={mul} smode={smode} mmu={mmu}）")
+print(f"  程序 {len(prog)} 条指令，自检 {len(EXPECT)} 项（mul={mul} smode={smode} mmu={mmu} rvfi={rvfi}）")

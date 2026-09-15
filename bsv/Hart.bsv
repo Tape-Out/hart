@@ -7,6 +7,15 @@ import Decode::*;
 import Muldiv::*;
 import HartRegs::*;
 import Mmu::*;
+import Rvfi::*;
+import RvfiPins::*;
+
+// 恒定的只读桩：rvfi 关掉时占位，综合器整片消掉
+function Reg#(t) roReg(t v) =
+  interface Reg;
+    method t _read = v;
+    method Action _write(t x) = noAction;
+  endinterface;
 
 // RV32I[M] 核心，M 态必备、S/U 两态由 smode 开关决定。三级：取指 / 译码执行 / 写回，**停顿而不旁路**。
 //
@@ -26,6 +35,7 @@ typedef struct {
   Bool mul;
   Bool smode;
   Bool mmu;
+  Bool rvfi;
 } HartCfg;
 
 typedef enum { Fetch, Exec, Mem, Muls, CsrRd, CsrWr }
@@ -58,6 +68,8 @@ interface HartIfc#(numeric type aw, numeric type dw);
   interface RegManager#(32, 32) dmem;
   interface HartIrq             irq;
   interface HartPins            pins;
+  // 形式验证用的 RVFI 端口（riscv-formal rvfi.rst）；rvfi 关掉时恒为零
+  (* prefix = "" *) interface RvfiPins rvfi;
 endinterface
 
 module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
@@ -120,6 +132,23 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
   // 退休计数不能跟 CSR 访问写在同一条规则里：minstret 是软硬双写的 CReg，
   // 两个端口不许在一条规则里同时用（G0004）。改成发个脉冲，计数单列一处。
   PulseWire retire <- mkPulseWire;
+  // RVFI：出记录的规则把这一条放到线上，rvLatch 一条规则统一编号、打一拍输出。
+  // trapped 说这一拍进了陷入，下一条出记录的指令就是处理程序的头一条（rvfi_intr）
+  RWire#(Rvfi)   rvW      <- mkRWire;
+  PulseWire      trapped  <- mkPulseWire;
+  Reg#(Rvfi)     rvR      = roReg(idle);
+  Reg#(Bit#(64)) rvOrder  = roReg(0);
+  Reg#(Bool)     rvIntr   = roReg(False);
+  // CSR 读拍读出的旧值与 rs1 的值：写拍出记录时 rd 已经改过，rd 与 rs1 同号时不能重读
+  Reg#(Bit#(32)) rvCsrOld = roReg(0);
+  Reg#(Bit#(32)) rvCsrRs1 = roReg(0);
+  if (cfg.rvfi) begin
+    rvR      <- mkReg(idle);
+    rvOrder  <- mkReg(0);
+    rvIntr   <- mkReg(False);
+    rvCsrOld <- mkReg(0);
+    rvCsrRs1 <- mkReg(0);
+  end
   Reg#(Bit#(32))  hid   <- mkReg(0);
   Wire#(Bit#(32)) hidIn <- mkBypassWire;
   Wire#(Bool)     halted <- mkBypassWire;
@@ -164,6 +193,19 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
   function Action setPriv(Bit#(2) v) = action
     if (cfg.smode) privR <= v;
   endaction;
+
+  // 一条记录的公共部分：指令字、执行前后的 pc、特权级、rs1/rs2 执行前的值
+  function Rvfi rvBase(Bit#(32) nextPc, Bool trap);
+    Rvfi r = idle;
+    r.valid    = True;
+    r.insn     = instr;
+    r.trap     = trap;
+    r.mode     = priv;
+    r.ixl      = 1;
+    r.pc_rdata = pc;
+    r.pc_wdata = nextPc;
+    return readRs(dec.rs1, rd(dec.rs1), dec.rs2, rd(dec.rs2), r);
+  endfunction
 
   // 委托只对「在 M 以下的特权级发生」的陷入生效，M 态自己的陷入永远留在 M。
   function Bool deleg(Bit#(31) code, Bool isIrq) =
@@ -220,6 +262,19 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
   rule tick;
     csrf.mcycle_in(csrf.mcycle + 1);
     if (retire) csrf.minstret_in(csrf.minstret + 1);
+  endrule
+
+  rule rvLatch (cfg.rvfi);
+    Rvfi r = fromMaybe(idle, rvW.wget);
+    if (isValid(rvW.wget)) begin
+      r.order = rvOrder;
+      r.intr  = rvIntr;
+      rvOrder <= rvOrder + 1;
+      // 陷入的那一条自己不带标记，它后面的那一条带
+      rvIntr  <= trapped;
+    end else if (trapped)
+      rvIntr <= True;
+    rvR <= r;
   endrule
 
   // 陷入的现场保存与跳转。写 pc 与 st 由调用处统一做，这里只碰 CSR。
@@ -298,6 +353,7 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
   rule doTrapEntry (st == Fetch && !halted && irqPending);
     enterTrap(irqCode, True, 0);
     pc <= trapTarget(irqCode, True);
+    trapped.send();
   endrule
 
   // 响应回来了才走。没回来就停在 Fetch，手一直举着。
@@ -310,6 +366,7 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
       Bit#(31) code = iPf ? 12 : 1;
       enterTrap(code, False, pc);
       pc <= trapTarget(code, False);
+      trapped.send();
     end else begin
       instr <= iRspX.rdata;
       dec   <= decode(iRspX.rdata, cfg.mul);
@@ -327,6 +384,7 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
     Bit#(32) nPc  = next;
     Stage    nSt  = Fetch;
     Bool     bump = True;          // 这条指令这一拍就退休了吗
+    Bool     isTrap = False;       // 这条指令陷入了（仍出 RVFI 记录，但不算 minstret）
 
     case (d.kind)
       Reg: if (d.isMul) begin
@@ -368,6 +426,7 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
              // 地址的第 9、8 位写明了这个 CSR 属于哪一级，够不着就是非法指令
              enterTrap(2, False, instr);
              nPc = trapTarget(2, False);
+             isTrap = True;
            end else begin
              nSt = CsrRd; nPc = pc; bump = False;
            end
@@ -377,9 +436,11 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
         if (d.imm == 32'h000) begin                        // ecall
           enterTrap(ec, False, 0);
           nPc = trapTarget(ec, False);
+          isTrap = True;
         end else if (d.imm == 32'h001) begin               // ebreak
           enterTrap(3, False, 0);
           nPc = trapTarget(3, False);
+          isTrap = True;
         end else if (d.imm == 32'h302 && priv == 2'b11) begin  // mret
           nPc = csrf.mepc;
           csrf.mstatus_mie_in(csrf.mstatus_mpie);
@@ -410,11 +471,13 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
           // U 态一条 mret 就跳到 mepc，还把特权级设成 mpp。
           enterTrap(2, False, instr);
           nPc = trapTarget(2, False);
+          isTrap = True;
         end
       end
       default: begin                                        // 非法指令
         enterTrap(2, False, instr);
         nPc = trapTarget(2, False);
+        isTrap = True;
       end
     endcase
 
@@ -423,13 +486,31 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
       pc <= nPc;
       st <= nSt;
     end
-    if (bump) retire.send();
+    // minstret 只算退休且没陷入的：特权规范 3.3.1 *As ECALL and EBREAK cause synchronous exceptions,
+    // they are not considered to retire, and should not increment the minstret CSR.*
+    if (bump && !isTrap) retire.send();
+    if (isTrap) trapped.send();
+    if (cfg.rvfi && bump) begin
+      // rd 写的值在 RVFI 这边另算一遍：不去动上面那条数据通路，rvfi 关掉时这一段整片消掉
+      Bit#(32) rdv  = 0;
+      Bool     wrRd = False;
+      case (d.kind)
+        Reg:   begin wrRd = True; rdv = alu(d.alu, a, b); end
+        Imm:   begin wrRd = True; rdv = alu(d.alu, a, d.imm); end
+        Lui:   begin wrRd = True; rdv = d.imm; end
+        Auipc: begin wrRd = True; rdv = pc + d.imm; end
+        Jal:   begin wrRd = True; rdv = next; end
+        Jalr:  begin wrRd = True; rdv = next; end
+      endcase
+      rvW.wset(writeRd((wrRd && !isTrap) ? d.rd : 0, rdv, rvBase(nPc, isTrap)));
+    end
   endrule
 
   rule doMul (st == Muls && md.done);
     wr(dec.rd, md.result);
     advance(pc + 4);
     retire.send();
+    if (cfg.rvfi) rvW.wset(writeRd(dec.rd, md.result, rvBase(pc + 4, False)));
   endrule
 
   rule doMem (st == Mem && dRspV);
@@ -442,6 +523,8 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
       enterTrap(code, False, memAd);
       pc <= trapTarget(code, False);
       st <= Fetch;
+      trapped.send();
+      if (cfg.rvfi) rvW.wset(access(memAd & ~32'h3, 0, 0, 0, 0, rvBase(trapTarget(code, False), True)));
     end else begin
       if (!dReq.write) begin
         Bit#(2)  lo = memAd[1:0];
@@ -454,7 +537,9 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
                         default: w;
                       endcase;
         wr(d.rd, v);
-      end
+        if (cfg.rvfi) rvW.wset(writeRd(d.rd, v, access(memAd & ~32'h3, 4'hF, dRspX.rdata, 0, 0, rvBase(pc + 4, False))));
+      end else if (cfg.rvfi)
+        rvW.wset(access(memAd & ~32'h3, 0, 0, dReq.wstrb, dReq.wdata, rvBase(pc + 4, False)));
       advance(pc + 4);
       retire.send();
     end
@@ -475,6 +560,10 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
     // rs1 为 0 的 set/clear 是纯读，不该产生写副作用
     Bool doWrite = (d.csrOp == CsrRw) || (d.csrImm ? d.imm != 0 : d.rs1 != 0);
     csrWr <= doWrite;
+    if (cfg.rvfi) begin
+      rvCsrOld <= old.rdata;
+      rvCsrRs1 <= rd(d.rs1);
+    end
     if (doWrite) st <= CsrWr;
     else begin
       // CSR 访问之后不链接，规规矩矩过一趟 Fetch。写 CSR 改的正是中断使能与
@@ -482,6 +571,7 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
       pc <= pc + 4;
       st <= Fetch;
       retire.send();
+      if (cfg.rvfi) rvW.wset(writeRd(d.rd, old.rdata, rvBase(pc + 4, False)));
     end
   endrule
 
@@ -491,6 +581,11 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
     pc <= pc + 4;
     st <= Fetch;
     retire.send();
+    if (cfg.rvfi) begin
+      // rs2 这几位是 CSR 地址的一部分，不读寄存器，按规范给地址 0
+      Rvfi r = readRs(dec.rs1, rvCsrRs1, 0, 0, rvBase(pc + 4, False));
+      rvW.wset(writeRd(dec.rd, rvCsrOld, r));
+    end
   endrule
 
   RegManager#(32, 32) iUp = interface RegManager;
@@ -565,6 +660,8 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
     method Action hartid(Bit#(32) v); hidIn._write(v); endmethod
     method Action halt(Bool v); halted._write(v); endmethod
   endinterface
+
+  interface rvfi = rvfiPins(rvR);
 endmodule
 
 endpackage
