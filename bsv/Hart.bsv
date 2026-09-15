@@ -159,6 +159,16 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
     if (i != 0) rf[i] <= v;
   endaction;
 
+  // 访存口一笔只碰一个字，跨到下一个字的字节会被丢掉，所以半字访问要偶地址、整字访问要低两位为零。
+  // 不对齐就在翻译之前报地址不对齐，特权规范 3.1.15：*Implementations that never support misaligned
+  // accesses can unconditionally raise the misaligned-address exception without performing address
+  // translation or protection checks.*
+  function Bool misaligned(Bit#(3) fn3, Bit#(32) ad) = case (fn3[1:0])
+                                                        1: ad[0] != 0;
+                                                        2: ad[1:0] != 0;
+                                                        default: False;
+                                                      endcase;
+
   function Bit#(32) alu(AluOp o, Bit#(32) a, Bit#(32) b);
     case (o)
       OpAdd:  return a + b;
@@ -280,7 +290,7 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
   // 陷入的现场保存与跳转。写 pc 与 st 由调用处统一做，这里只碰 CSR。
   function Action enterTrap(Bit#(31) code, Bool isIrq, Bit#(32) tval) = action
     if (deleg(code, isIrq)) begin
-      csrf.sepc_in(pc);
+      csrf.sepc_in(pc[31:2]);
       csrf.scause_code_in(code);
       csrf.scause_intr_in(isIrq ? 1 : 0);
       csrf.stval_in(tval);
@@ -289,7 +299,7 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
       csrf.mstatus_spp_in(priv[0]);
       setPriv(2'b01);
     end else begin
-      csrf.mepc_in(pc);
+      csrf.mepc_in(pc[31:2]);
       csrf.mcause_code_in(code);
       csrf.mcause_intr_in(isIrq ? 1 : 0);
       csrf.mtval_in(tval);
@@ -397,16 +407,42 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
       Imm:   wr(d.rd, alu(d.alu, a, d.imm));
       Lui:   wr(d.rd, d.imm);
       Auipc: wr(d.rd, pc + d.imm);
-      Jal:   begin wr(d.rd, next); nPc = pc + d.imm; end
-      Jalr:  begin wr(d.rd, next); nPc = (a + d.imm) & ~32'h1; end
-      Branch: if (branchTaken(d.fn3, a, b)) nPc = pc + d.imm;
+      // 没有 C 扩展，IALIGN 是 32：目标低两位非零就在跳转这一条上陷入，rd 不写。特权规范 3.1.15：
+      // *Instruction address misaligned exceptions are raised by control-flow instructions with
+      // misaligned targets, rather than by the act of fetching an instruction.*
+      Jal, Jalr: begin
+        Bit#(32) t = (d.kind == Jal) ? pc + d.imm : (a + d.imm) & ~32'h1;
+        if (t[1:0] == 0) begin
+          wr(d.rd, next);
+          nPc = t;
+        end else begin
+          enterTrap(0, False, t);
+          nPc = trapTarget(0, False);
+          isTrap = True;
+        end
+      end
+      Branch: if (branchTaken(d.fn3, a, b)) begin
+        Bit#(32) t = pc + d.imm;
+        if (t[1:0] == 0) nPc = t;
+        else begin
+          enterTrap(0, False, t);
+          nPc = trapTarget(0, False);
+          isTrap = True;
+        end
+      end
       Load: begin
         Bit#(32) ad = a + d.imm;
-        memAd  <= ad;
-        dReq   <= RegReq { addr: ad & ~32'h3, write: False,
-                           wdata: 0, wstrb: 4'hF };
-        dValid <= True;
-        nSt = Mem; nPc = pc; bump = False;
+        if (misaligned(d.fn3, ad)) begin
+          enterTrap(4, False, ad);
+          nPc = trapTarget(4, False);
+          isTrap = True;
+        end else begin
+          memAd  <= ad;
+          dReq   <= RegReq { addr: ad & ~32'h3, write: False,
+                             wdata: 0, wstrb: 4'hF };
+          dValid <= True;
+          nSt = Mem; nPc = pc; bump = False;
+        end
       end
       Store: begin
         Bit#(32) ad = a + d.imm;
@@ -416,11 +452,17 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
                           1: (4'b0011 << lo);
                           default: 4'b1111;
                         endcase;
-        memAd  <= ad;
-        dReq   <= RegReq { addr: ad & ~32'h3, write: True,
-                           wdata: b << {lo, 3'b000}, wstrb: strb };
-        dValid <= True;
-        nSt = Mem; nPc = pc; bump = False;
+        if (misaligned(d.fn3, ad)) begin
+          enterTrap(6, False, ad);
+          nPc = trapTarget(6, False);
+          isTrap = True;
+        end else begin
+          memAd  <= ad;
+          dReq   <= RegReq { addr: ad & ~32'h3, write: True,
+                             wdata: b << {lo, 3'b000}, wstrb: strb };
+          dValid <= True;
+          nSt = Mem; nPc = pc; bump = False;
+        end
       end
       Csr: if (priv < d.csr[9:8] || (tvmTrap && d.csr == 'h180)) begin
              // 地址的第 9、8 位写明了这个 CSR 属于哪一级，够不着就是非法指令
@@ -442,7 +484,7 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
           nPc = trapTarget(3, False);
           isTrap = True;
         end else if (d.imm == 32'h302 && priv == 2'b11) begin  // mret
-          nPc = csrf.mepc;
+          nPc = {csrf.mepc, 2'b00};
           csrf.mstatus_mie_in(csrf.mstatus_mpie);
           csrf.mstatus_mpie_in(1);
           setPriv(csrf.mstatus_mpp);
@@ -450,7 +492,7 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
           // 返回后 mpp 退到实现支持的最低级：有 U 就退到 U，没有就还是 M
           csrf.mstatus_mpp_in(cfg.smode ? 2'b00 : 2'b11);
         end else if (cfg.smode && d.imm == 32'h102 && priv != 2'b00 && !tsrTrap) begin  // sret
-          nPc = csrf.sepc;
+          nPc = {csrf.sepc, 2'b00};
           csrf.mstatus_sie_in(csrf.mstatus_spie);
           csrf.mstatus_spie_in(1);
           setPriv(zeroExtend(csrf.mstatus_spp));

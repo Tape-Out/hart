@@ -90,7 +90,7 @@ deps:
   rvfi: ^0.1
 area:
   base:
-    fixed: 37973.32
+    fixed: 37587.48
   margin: 0.0
   model: measured-grid
   error:
@@ -105,41 +105,41 @@ area:
       smode: false
       mmu: false
       rvfi: false
-    um2: 37973.32
+    um2: 37587.48
   - at:
       mul: false
       smode: true
       mmu: false
       rvfi: false
-    um2: 41086.08
+    um2: 43678.32
   - at:
       mul: false
       smode: true
       mmu: true
       rvfi: false
-    um2: 66968.72
+    um2: 67946.2
   - at:
       mul: true
       smode: false
       mmu: false
       rvfi: false
-    um2: 44005.08
+    um2: 44939.16
   - at:
       mul: true
       smode: true
       mmu: false
       rvfi: false
-    um2: 48682.2
+    um2: 49411.88
   - at:
       mul: true
       smode: true
       mmu: true
       rvfi: false
-    um2: 73672.76
+    um2: 75042.52
   corner:
     tool: ecc
     pdk: ics55
     freq_mhz: 100
     measured: '2026-09-16'
     toolchain: bsc 2026.01 · yosys 0.68+195 · ecc 0.1.0a11
-    gen_digest: sha256:a9ffca72724e750d
+    gen_digest: sha256:6f53bba5d082712e

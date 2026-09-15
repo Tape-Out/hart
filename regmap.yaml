@@ -76,7 +76,9 @@ regs:
   - name: mepc
     offset: 0x341
     desc: exception program counter
-    fields: [ { name: val, width: 32, sw: rw, hw: rw, reset: 0 } ]
+    # 只支持 IALIGN=32：*the two low bits (mepc[1:0]) are always zero*（3.1.14）。
+    # 原来 32 位全可写，软件写个奇地址再 mret 就跳到不对齐的 pc
+    fields: [ { name: val, bits: "31:2", sw: rw, hw: rw, reset: 0 } ]
 
   - name: mcause
     offset: 0x342
@@ -173,7 +175,8 @@ regs:
     offset: 0x141
     desc: supervisor exception program counter
     feature: smode
-    fields: [ { name: val, width: 32, sw: rw, hw: rw, reset: 0 } ]
+    # 同 mepc（4.1.7）
+    fields: [ { name: val, bits: "31:2", sw: rw, hw: rw, reset: 0 } ]
 
   - name: scause
     offset: 0x142

@@ -7,7 +7,8 @@
 不去掉的话测的是「核怎么处理非法指令」，不是「核算得对不对」，两件事。
 `smode` 的那一段两个方向都跑：开着时 mstatus.sie 写得进去，关着时读回必须是零。
 门控写漏了的表现是「关掉了硬件还在」，只有后一半看得出来。
-陷入段不靠特权级那一段，所有配置都跑：`minstret` 不算陷入的指令。
+陷入段不靠特权级那一段，所有配置都跑：`minstret` 不算陷入的指令，访存地址与跳转目标不对齐各报各的异常，
+`mepc`/`sepc` 低两位读回为零。
 `rvfi` 开时另查提交记录：编号连续，前后两条的 pc 接得上，写自检口的记录与期望值对得上。
 `mmu` 开时在 S 态那一段里接着开翻译，验五件事：真的翻译了（虚实两个地址读写互通）·
 TLB 真的缓存了 · sfence.vma 真的清了 · 三种权限各拒一次 · 取指缺页回得来。
@@ -327,6 +328,10 @@ DELEG_EXP[j:j] = MACH_EXP + [0x102] * 4
 
 # 陷入段。mtvec 指到陷入那条的下一条，陷入之后顺着往下走，不必写处理程序。
 # 一，minstret 不算陷入的指令（特权规范 3.3.1）：两次读之间退休的只有第一次读，ecall 不算，差 1。
+# 二，访存口一笔只碰一个字，地址不对齐就陷入：整字读低两位非零报 4，半字写奇地址报 6，tval 是地址。
+# 三，跳转目标不对齐（没有 C 扩展，IALIGN 是 32）在跳转这一条上报 0，tval 是目标。
+# 四，mepc、sepc 低两位只读零（3.1.14、4.1.7）。
+# a1 是 TAIL 里设好的 RAM 基址 0x8001_0000
 def vec(label):
     return [f"  lui  t2, hi({label})", f"  addi t2, t2, lo({label})", "  csrrw zero, 0x305, t2"]
 
@@ -339,8 +344,39 @@ TRAPS = [
     "  csrrs t4, 0xB02, zero",
     "  sub  t2, t4, t3",
     "  sw   t2, 0(a0)",              # 1
+    *vec("trap2"),
+    "  lw   t2, 1(a1)",
+"trap2:",
+    "  csrrs t2, 0x342, zero",
+    "  sw   t2, 0(a0)",              # 4
+    "  csrrs t2, 0x343, zero",
+    "  sub  t2, t2, a1",
+    "  sw   t2, 0(a0)",              # 1
+    *vec("trap3"),
+    "  sh   t2, 3(a1)",
+"trap3:",
+    "  csrrs t2, 0x342, zero",
+    "  sw   t2, 0(a0)",              # 6
+    "  csrrs t2, 0x343, zero",
+    "  sub  t2, t2, a1",
+    "  sw   t2, 0(a0)",              # 3
+    *vec("trap4"),
+    "  jalr ra, 2(t2)",
+"trap4:",
+    "  csrrs t3, 0x342, zero",
+    "  sw   t3, 0(a0)",              # 0
+    "  csrrs t3, 0x343, zero",
+    "  sub  t3, t3, t2",
+    "  sw   t3, 0(a0)",              # 2
+    "  addi t2, zero, -1",
+    "  csrrw zero, 0x341, t2",
+    "  csrrs t3, 0x341, zero",
+    "  sw   t3, 0(a0)",              # 0xFFFFFFFC
+    *(["  csrrw zero, 0x141, t2",
+       "  csrrs t3, 0x141, zero",
+       "  sw   t3, 0(a0)"] if smode else []),
 ]
-TRAPS_EXP = [1]
+TRAPS_EXP = [1, 4, 1, 6, 3, 0, 2, 0xFFFFFFFC] + ([0xFFFFFFFC] if smode else [])
 
 SRC = HEAD + (MEXT if mul else []) + TAIL + SMODE + TRAPS + (DELEG if smode else [])
 SRC += ["done:", "  jal  zero, done"]
