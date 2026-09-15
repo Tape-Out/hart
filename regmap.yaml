@@ -18,7 +18,9 @@ regs:
       - { name: spie, bits: "5:5",   sw: rw, hw: rw, reset: 0, feature: smode }
       - { name: mpie, bits: "7:7",   sw: rw, hw: rw, reset: 0 }
       - { name: spp,  bits: "8:8",   sw: rw, hw: rw, reset: 0, feature: smode }
-      - { name: mpp,  bits: "12:11", sw: rw, hw: rw, reset: 3 }
+      # MPP 是 WARL，只收实现了的特权级（3.1.6.1）；U 与 S 跟着 smode 同开同关
+      - { name: mpp,  bits: "12:11", sw: rw, hw: rw, reset: 3,
+          legal: [ 3, { min: 0, max: 1, feature: smode } ] }
       # 这六位在「不支持 S 态」或「不支持 U 态」时才许恒为零（3.1.6.3、3.1.6.5）。
       # 我们的 U 态与 S 态同开同关，所以都跟着 smode；SUM 另要翻译在，跟着 mmu。
       - { name: mprv, bits: "17:17", sw: rw, hw: rw, reset: 0, feature: smode }
@@ -62,7 +64,8 @@ regs:
     offset: 0x305
     desc: trap vector base and mode
     fields:
-      - { name: mode, bits: "1:0",  sw: rw, hw: r, reset: 0 }
+      # MODE 是 WARL，2 与 3 保留（3.1.7 表 3.5）
+      - { name: mode, bits: "1:0",  sw: rw, hw: r, reset: 0, legal: [0, 1] }
       - { name: base, bits: "31:2", sw: rw, hw: r, reset: 0 }
 
   - name: mscratch
@@ -157,7 +160,7 @@ regs:
     desc: supervisor trap vector base and mode
     feature: smode
     fields:
-      - { name: mode, bits: "1:0",  sw: rw, hw: r, reset: 0 }
+      - { name: mode, bits: "1:0",  sw: rw, hw: r, reset: 0, legal: [0, 1] }
       - { name: base, bits: "31:2", sw: rw, hw: r, reset: 0 }
 
   - name: sscratch

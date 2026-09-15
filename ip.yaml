@@ -28,7 +28,7 @@ features:
     default: true
     desc: M 扩展。乘法四周期、除法逐位，见 E28
     area:
-      fixed: 9504.32
+      fixed: 10264.52
   smode:
     type: bool
     default: false
@@ -82,7 +82,7 @@ deps:
   hwcore: ^0.1
 area:
   base:
-    fixed: 34684.16
+    fixed: 34418.16
   margin: 0.0
   model: measured-grid
   error:
@@ -96,36 +96,36 @@ area:
       mul: false
       smode: false
       mmu: false
-    um2: 34684.16
+    um2: 34418.16
   - at:
       mul: false
       smode: true
       mmu: false
-    um2: 41108.2
+    um2: 39309.2
   - at:
       mul: false
       smode: true
       mmu: true
-    um2: 66109.68
+    um2: 65919.84
   - at:
       mul: true
       smode: false
       mmu: false
-    um2: 44188.48
+    um2: 44682.68
   - at:
       mul: true
       smode: true
       mmu: false
-    um2: 48476.4
+    um2: 48380.92
   - at:
       mul: true
       smode: true
       mmu: true
-    um2: 74620.56
+    um2: 74076.8
   corner:
     tool: ecc
     pdk: ics55
     freq_mhz: 100
-    measured: '2026-09-14'
+    measured: '2026-09-15'
     toolchain: bsc 2026.01 · yosys 0.68+195 · ecc 0.1.0a11
-    gen_digest: sha256:099463a8e9d1a131
+    gen_digest: sha256:aa068193422cca96
