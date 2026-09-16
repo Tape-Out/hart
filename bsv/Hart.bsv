@@ -7,6 +7,7 @@ import Decode::*;
 import Muldiv::*;
 import HartRegs::*;
 import Mmu::*;
+import DReg::*;
 import Rvfi::*;
 import RvfiPins::*;
 
@@ -36,6 +37,7 @@ typedef struct {
   Bool smode;
   Bool mmu;
   Bool rvfi;
+  Bool imsic;
 } HartCfg;
 
 typedef enum { Fetch, Exec, Mem, Muls, CsrRd, CsrWr }
@@ -63,11 +65,25 @@ interface HartPins;
   method Action halt((* port = "halt" *) Bool v);
 endinterface
 
+// 核这一侧的中断文件窗口：不依赖 imsic 包，装配里接到它的零等待 csr 口。
+// sel 是 miselect 当前的值，rdata 是那一格的读出，wr/wdata 是软件经 mireg 写进来的，
+// topei 是 IP 报的最高号，claim 说「这一拍软件写了 mtopei」
+interface HartImsic;
+  (* always_ready *) method Bit#(8)  sel;
+  (* always_ready, always_enabled *) method Action rdata(Bit#(32) v);
+  (* always_ready *) method Bool     wr;
+  (* always_ready *) method Bit#(32) wdata;
+  (* always_ready, always_enabled *) method Action topei(Bit#(32) v);
+  (* always_ready *) method Bool     claim;
+endinterface
+
 interface HartIfc#(numeric type aw, numeric type dw);
   interface RegManager#(32, 32) imem;
   interface RegManager#(32, 32) dmem;
   interface HartIrq             irq;
   interface HartPins            pins;
+  // imsic 关掉时 sel 恒 0、wr 与 claim 恒假，综合器整片消掉
+  interface HartImsic           imsic;
   // 形式验证用的 RVFI 端口（riscv-formal rvfi.rst）；rvfi 关掉时恒为零
   (* prefix = "" *) interface RvfiPins rvfi;
 endinterface
@@ -149,6 +165,24 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
     rvCsrOld <- mkReg(0);
     rvCsrRs1 <- mkReg(0);
   end
+  // 间接 CSR（AIA 2.1）：miselect 存在核里，mireg 与 mtopei 是窗口，不进寄存器堆
+  // 写出去的脉冲用 mkDReg 打一拍：接的那一侧读的是寄存器的值，不是线。
+  // 用 PulseWire 的话，读脉冲的规则「不能早于」发脉冲的规则，而它同时又驱着读出值，
+  // bsc 于是把外面那条排在前面，核这条永远轮不上（G0010，第一次就卡死在这里）。
+  // 软件写了之后隔一拍才生效，而下一条指令至少两拍之后，读回来的仍是新值
+  Reg#(Bit#(8))   isel    = roReg(0);
+  Wire#(Bit#(32)) iregIn  <- mkBypassWire;
+  Wire#(Bit#(32)) topeiIn <- mkBypassWire;
+  Reg#(Bool)      iregWrR <- mkDReg(False);
+  Reg#(Bool)      claimR  <- mkDReg(False);
+  Reg#(Bit#(32))  iregWrV = roReg(0);
+  if (cfg.imsic) begin
+    isel    <- mkReg(0);
+    iregWrV <- mkReg(0);
+  end
+  function Bool isImsicCsr(Bit#(12) a) =
+    cfg.imsic && (a == 12'h350 || a == 12'h351 || a == 12'h35C);
+
   Reg#(Bit#(32))  hid   <- mkReg(0);
   Wire#(Bit#(32)) hidIn <- mkBypassWire;
   Wire#(Bool)     halted <- mkBypassWire;
@@ -588,11 +622,45 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
   endrule
 
   // CSR 真的分两拍：一条规则里 access 只能调一次，而 csrrs/csrrc 要拿旧值算新值
-  rule doCsrRead (st == CsrRd);
+  // 间接 CSR 不经寄存器堆，读与写在同一拍做完，不必进 CsrWr
+  rule doCsrIndirect (st == CsrRd && isImsicCsr(dec.csr));
+    let d = dec;
+    Bit#(32) src = d.csrImm ? d.imm : rd(d.rs1);
+    Bit#(32) cur = (d.csr == 12'h350) ? zeroExtend(isel)
+                 : (d.csr == 12'h351) ? iregIn : topeiIn;
+    Bit#(32) nv  = case (d.csrOp)
+                     CsrRw: src;
+                     CsrRs: (cur | src);
+                     default: (cur & ~src);
+                   endcase;
+    Bool doWrite = (d.csrOp == CsrRw) || (d.csrImm ? d.imm != 0 : d.rs1 != 0);
+    wr(d.rd, cur);
+    if (doWrite) begin
+      // miselect 是 WARL，规范只要求存得下 0..0xFF（AIA 2.1）
+      if (d.csr == 12'h350) isel <= truncate(nv);
+      else if (d.csr == 12'h351) begin iregWrV <= nv; iregWrR <= True; end
+      // mtopei 写什么值都算领取（AIA 3.9）
+      else claimR <= True;
+    end
+    advance(pc + 4);
+    retire.send();
+    if (cfg.rvfi) rvW.wset(writeRd(d.rd, cur, rvBase(pc + 4, False)));
+  endrule
+
+  rule doCsrRead (st == CsrRd && !isImsicCsr(dec.csr));
     let d = dec;
     Bit#(32) src = d.csrImm ? d.imm : rd(d.rs1);
     let old <- csrf.regs.access(RegReq { addr: truncate(d.csr), write: False,
                                          wdata: 0, wstrb: 4'hF });
+    // 没映射的地址寄存器组本来就报 err，核原来不看这一位：读 0、写丢，
+    // 而特权规范 2.1 要求报非法指令
+    if (old.err) begin
+      enterTrap(2, False, instr);
+      pc <= trapTarget(2, False);
+      st <= Fetch;
+      trapped.send();
+      if (cfg.rvfi) rvW.wset(rvBase(trapTarget(2, False), True));
+    end else begin
     wr(d.rd, old.rdata);
     csrNv <= case (d.csrOp)
                CsrRw: src;
@@ -614,6 +682,7 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
       st <= Fetch;
       retire.send();
       if (cfg.rvfi) rvW.wset(writeRd(d.rd, old.rdata, rvBase(pc + 4, False)));
+    end
     end
   endrule
 
@@ -696,6 +765,15 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
       mtipIn._write(mtip);
       meipIn._write(meip);
     endmethod
+  endinterface
+
+  interface HartImsic imsic;
+    method Bit#(8)  sel = isel;
+    method Action rdata(Bit#(32) v); iregIn._write(v); endmethod
+    method Bool     wr = iregWrR;
+    method Bit#(32) wdata = iregWrV;
+    method Action topei(Bit#(32) v); topeiIn._write(v); endmethod
+    method Bool     claim = claimR;
   endinterface
 
   interface HartPins pins;

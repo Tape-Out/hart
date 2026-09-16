@@ -28,24 +28,32 @@ features:
     default: true
     desc: M 扩展。乘法四周期、除法逐位，见 E28
     area:
-      fixed: 10264.52
+      fixed: 7690.76
   smode:
     type: bool
     default: false
     desc: 监管者态。委托、S 的陷入现场与 sret；E27 证过特权级范围是一个开关而不是架构分岔
     area:
-      fixed: 6424.04
+      fixed: 5676.16
   mmu:
     type: bool
     default: false
     desc: Sv32 地址翻译。16 条全相联 TLB（E29 定案）加两级页表遍历器；没有监管者态就没有它
     depends: [smode]
     area:
-      fixed: 27004.04
+      fixed: 25761.96
   rvfi:
     type: bool
     default: false
     desc: RVFI 提交记录端口（riscv-formal rvfi.rst），只给形式验证用；关掉时整片消掉
+    area:
+      fixed: 0.0
+  imsic:
+    type: bool
+    default: false
+    desc: AIA 的间接 CSR（miselect、mireg、mtopei）与中断文件窗口；关掉时三个地址报非法指令
+    area:
+      fixed: 2328.48
 test:
   # 访存口在收到响应之前一直顶着 valid 与 req 不动，「响应即已被接收」，所以不看 ready
   deadread:
@@ -61,9 +69,6 @@ test:
   - mip_seip_in
   - mscratch
   - sscratch
-  # rvfi 只在形式验证的顶层里开，进 SoC 的配置恒为关，这份面积不会上片
-  noarea:
-  - rvfi
 emit:
 - kind: bsv
   package: Hart
@@ -85,61 +90,76 @@ emit:
     type: HartIrq
   - name: pins
     type: HartPins
+  - name: imsic
+    type: HartImsic
 deps:
   hwcore: ^0.1
   rvfi: ^0.1
 area:
   base:
-    fixed: 37587.48
+    fixed: 37450.84
   margin: 0.0
-  model: measured-grid
+  model: points-additive
   error:
     bound: 0.0
-    sign: exact
-    note: three boolean knobs with mmu depending on smode leave six valid 
-      combinations, and all six are measured, so every configuration is a table 
-      lookup and nothing is ever extrapolated
+    sign: over
+    note: first measured by ran recal --init at the range ends and the default 
+      of each parameter; the margin is the worst underestimate at 1 off-grid 
+      probes
   measured:
   - at:
       mul: false
       smode: false
       mmu: false
       rvfi: false
-    um2: 37587.48
-  - at:
-      mul: false
-      smode: true
-      mmu: false
-      rvfi: false
-    um2: 43678.32
-  - at:
-      mul: false
-      smode: true
-      mmu: true
-      rvfi: false
-    um2: 67946.2
+      imsic: false
+    um2: 37450.84
   - at:
       mul: true
       smode: false
       mmu: false
       rvfi: false
-    um2: 44939.16
+      imsic: false
+    um2: 45141.6
   - at:
-      mul: true
+      mul: false
       smode: true
       mmu: false
       rvfi: false
-    um2: 49411.88
+      imsic: false
+    um2: 43127.0
+  - at:
+      mul: false
+      smode: true
+      mmu: true
+      rvfi: false
+      imsic: false
+    um2: 68888.96
+  - at:
+      mul: false
+      smode: false
+      mmu: false
+      rvfi: true
+      imsic: false
+    um2: 37217.04
+  - at:
+      mul: false
+      smode: false
+      mmu: false
+      rvfi: false
+      imsic: true
+    um2: 39779.32
   - at:
       mul: true
       smode: true
       mmu: true
-      rvfi: false
-    um2: 75042.52
+      rvfi: true
+      imsic: true
+    um2: 74020.24
   corner:
     tool: ecc
     pdk: ics55
     freq_mhz: 100
     measured: '2026-09-16'
     toolchain: bsc 2026.01 · yosys 0.68+195 · ecc 0.1.0a11
-    gen_digest: sha256:6f53bba5d082712e
+    gen_digest: sha256:d226571c53b27e5b

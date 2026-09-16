@@ -29,6 +29,7 @@ mul = bool(k.get("mul", True))
 smode = bool(k.get("smode", False))
 mmu = bool(k.get("mmu", False))
 rvfi = bool(k.get("rvfi", False))
+imsic = bool(k.get("imsic", False))
 
 
 def li(r, v):
@@ -387,14 +388,111 @@ TRAPS = [
 ]
 TRAPS_EXP = [1, 5, 4, 1, 6, 3, 0, 2, 0xFFFFFFFC] + ([0xFFFFFFFC] if smode else [])
 
-SRC = HEAD + (MEXT if mul else []) + TAIL + SMODE + TRAPS + (DELEG if smode else [])
+# 间接 CSR 接中断文件（AIA 2.1、3.7–3.9）：miselect 选址，mireg 是窗口，mtopei 读最高号、写即领取。
+# 测试台里的假中断文件：5 号挂起，阈值放行。处理程序跳过出错那条并报哨兵，所以实现没做时红而不挂。
+IMSIC = [
+    *vec("imtrap"),
+    "  addi t2, zero, 0x70",          # miselect = eidelivery
+    "  csrrw zero, 0x350, t2",
+    "  csrrs t3, 0x350, zero",
+    "  sw   t3, 0(a0)",               # 0x70：选址寄存器存得住 8 位
+    "  addi t2, zero, 1",
+    "  csrrw zero, 0x351, t2",        # 经窗口开投递
+    "  csrrs t3, 0x351, zero",
+    "  sw   t3, 0(a0)",               # 1：窗口读回的是中断文件里的值
+    "  addi t2, zero, 0x71",          # 保留的选址
+    "  csrrw zero, 0x350, t2",
+    "  csrrs t3, 0x351, zero",
+    "  sw   t3, 0(a0)",               # 0：保留选址读 0
+    "  addi t2, zero, 0xC0",          # miselect = eie0
+    "  csrrw zero, 0x350, t2",
+    "  addi t2, zero, 0x20",          # 使能 5 号
+    "  csrrw zero, 0x351, t2",
+    "  csrrs t3, 0x35C, zero",
+    "  sw   t3, 0(a0)",               # 0x00050005：mtopei 报 5 号
+    "  csrrw t3, 0x35C, zero",        # 写即领取，读到的仍是领取前的值
+    "  sw   t3, 0(a0)",               # 0x00050005
+    "  csrrs t3, 0x35C, zero",
+    "  sw   t3, 0(a0)",               # 0：领取之后没有待决的了
+    "  jal  zero, imdone",
+"imtrap:",
+    "  csrrs t2, 0x341, zero",
+    "  addi t2, t2, 4",
+    "  csrrw zero, 0x341, t2",
+    "  addi t3, zero, -2",
+    "  sw   t3, 0(a0)",               # 哨兵：这条 CSR 访问陷入了
+    "  mret",
+"imdone:",
+]
+IMSIC_EXP = [0x70, 1, 0, 0x00050005, 0x00050005, 0]
+
+NOCSR = [
+    *vec("nocsr1"),
+    "  csrrs t2, 0x7C0, zero",
+"nocsr1:",
+    "  csrrs t2, 0x342, zero",
+    "  sw   t2, 0(a0)",
+]
+SMODE_OFF = [
+    *vec("nos1"),
+    "  addi t2, zero, 2",
+    "  csrrs zero, 0x100, t2",
+"nos1:",
+    "  csrrs t2, 0x342, zero",
+    "  sw   t2, 0(a0)",
+]
+SRC = HEAD + (MEXT if mul else []) + TAIL + (SMODE if smode else SMODE_OFF) + NOCSR
+SRC += TRAPS
+# imsic 这一段排在 DELEG 前面：DELEG 末尾在等软件中断，测试台按「对完最后一项」才送那一拍边沿，
+# 接在它后面程序就停在那里等一个永远不来的中断（全开那一点 TIMEOUT 在第 69 项）
+SRC += IMSIC if imsic else []
+SRC += DELEG if smode else []
 SRC += ["done:", "  jal  zero, done"]
 EXPECT = (HEAD_EXP + (MEXT_EXP if mul else []) + TAIL_EXP
-          + [2 if smode else 0] + TRAPS_EXP + (DELEG_EXP if smode else []))
+          + [2] + [2] + TRAPS_EXP + (IMSIC_EXP if imsic else [])
+          + (DELEG_EXP if smode else []))
 
 prog = assemble(SRC)
 rom = "\n".join(f"      {i}: return 32'h{w:08X};" for i, w in enumerate(prog))
 exp = "\n".join(f"      {i}: return 32'h{v:08X};" for i, v in enumerate(EXPECT))
+
+# 假中断文件不按旋钮开关：核的窗口输入是 always_enabled，旋钮关掉时没人驱就报 G0066。
+# 关掉时核根本不看这些输入，驱着也不花什么（照测试台驱 irq、pins 的写法）。
+# imsic 开时这两块才真正被用到：只做这一刀要的三格（eidelivery 0x70、eip0 0x80、eie0 0xC0），
+# 5 号恒挂起。领取把 5 号的待决位拿掉，再读就没有了
+IM_REG = """
+  Reg#(Bit#(32)) imDeliv <- mkReg(0);
+  Reg#(Bit#(32)) imEie   <- mkReg(0);
+  Reg#(Bit#(32)) imEip   <- mkReg(32'h0000_0020);
+"""
+
+# 读出与写入分两条规则：一条规则既驱 rdata 又读 wr 的话，核那一侧「读窗口」与「发写脉冲」
+# 就绕成一个环，bsc 把文件这条排在前面，写脉冲永远看不见（G0010）
+IM_RULE = """
+  rule imsicRead;
+    Bit#(8)  sel = cpu.imsic.sel;
+    cpu.imsic.rdata((sel == 8'h70) ? imDeliv
+                  : (sel == 8'h80) ? imEip
+                  : (sel == 8'hC0) ? imEie : 0);
+    // 最高号：投递开着、挂起且使能、过阈值（这一刀阈值恒放行）
+    cpu.imsic.topei((imDeliv[0] == 1 && (imEip & imEie) != 0)
+                    ? 32'h0005_0005 : 0);
+  endrule
+
+  rule imsicWrite;
+    Bit#(8) sel = cpu.imsic.sel;
+    // 写 eip 有两条来路（经窗口写、领取清位），并列的 if 各写一次就是并行冲突（G0004）：
+    // 先算进局部变量，末尾只写一次
+    Bit#(32) nEip = imEip;
+    if (cpu.imsic.wr) begin
+      if (sel == 8'h70) imDeliv <= cpu.imsic.wdata;
+      else if (sel == 8'hC0) imEie <= cpu.imsic.wdata;
+      else if (sel == 8'h80) nEip = cpu.imsic.wdata;
+    end
+    if (cpu.imsic.claim) nEip = nEip & ~32'h0000_0020;
+    imEip <= nEip;
+  endrule
+"""
 
 # rvfi 开时测试台多出的三块。记录比访存口晚一拍出来，所以最后一项对完不马上结束，等 8 拍再收账
 RV_REG = """
@@ -498,7 +596,8 @@ module mkHart{label}Tb(Empty);
   HartIfc#(12, 32) cpu <- mkHart(HartCfg {{ mul: {"True" if mul else "False"},
                                             smode: {"True" if smode else "False"},
                                             mmu: {"True" if mmu else "False"},
-                                            rvfi: {"True" if rvfi else "False"} }});
+                                            rvfi: {"True" if rvfi else "False"},
+                                            imsic: {"True" if imsic else "False"} }});
   RegFile#(Bit#(8), Bit#(32)) ram <- mkRegFileFull;
 
   Reg#(Bit#(32)) cyc  <- mkReg(0);
@@ -507,7 +606,7 @@ module mkHart{label}Tb(Empty);
   Reg#(Bit#(32)) seen <- mkConfigReg(0);
   Reg#(Bool)     bad  <- mkReg(False);
   Reg#(Bool)     sent <- mkReg(False);
-{RV_REG}
+{IM_REG}{RV_REG}
   function Bool inRom(Bit#(32) a)  = a[31:28] == 4'h8 && a[17:16] == 0;
   function Bool inRam(Bit#(32) a)  = a[31:28] == 4'h8 && a[17:16] == 1;
   function Bool inRoot(Bit#(32) a) = a[31:28] == 4'h8 && a[17:16] == 2;
@@ -586,8 +685,8 @@ module mkHart{label}Tb(Empty);
     cpu.pins.hartid(0);
     cpu.pins.halt(False);
   endrule
-{RV_RULE}endmodule
+{IM_RULE}{RV_RULE}endmodule
 
 endpackage
 ''', encoding="utf-8")
-print(f"  程序 {len(prog)} 条指令，自检 {len(EXPECT)} 项（mul={mul} smode={smode} mmu={mmu} rvfi={rvfi}）")
+print(f"  程序 {len(prog)} 条指令，自检 {len(EXPECT)} 项（mul={mul} smode={smode} mmu={mmu} rvfi={rvfi} imsic={imsic}）")
