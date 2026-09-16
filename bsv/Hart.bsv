@@ -70,10 +70,10 @@ endinterface
 // topei 是 IP 报的最高号，claim 说「这一拍软件写了 mtopei」
 interface HartImsic;
   (* always_ready *) method Bit#(8)  sel;
-  (* always_ready, always_enabled *) method Action rdata(Bit#(32) v);
+  (* always_ready *) method Action rdata(Bit#(32) v);
   (* always_ready *) method Bool     wr;
   (* always_ready *) method Bit#(32) wdata;
-  (* always_ready, always_enabled *) method Action topei(Bit#(32) v);
+  (* always_ready *) method Action topei(Bit#(32) v);
   (* always_ready *) method Bool     claim;
 endinterface
 
@@ -171,8 +171,8 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
   // bsc 于是把外面那条排在前面，核这条永远轮不上（G0010，第一次就卡死在这里）。
   // 软件写了之后隔一拍才生效，而下一条指令至少两拍之后，读回来的仍是新值
   Reg#(Bit#(8))   isel    = roReg(0);
-  Wire#(Bit#(32)) iregIn  <- mkBypassWire;
-  Wire#(Bit#(32)) topeiIn <- mkBypassWire;
+  Wire#(Bit#(32)) iregIn  <- mkDWire(0);
+  Wire#(Bit#(32)) topeiIn <- mkDWire(0);
   Reg#(Bool)      iregWrR <- mkDReg(False);
   Reg#(Bool)      claimR  <- mkDReg(False);
   Reg#(Bit#(32))  iregWrV = roReg(0);

@@ -53,7 +53,7 @@ features:
     default: false
     desc: AIA 的间接 CSR（miselect、mireg、mtopei）与中断文件窗口；关掉时三个地址报非法指令
     area:
-      fixed: 2328.48
+      fixed: 2814.84
 test:
   # 访存口在收到响应之前一直顶着 valid 与 req 不动，「响应即已被接收」，所以不看 ready
   deadread:
@@ -148,18 +148,18 @@ area:
       mmu: false
       rvfi: false
       imsic: true
-    um2: 39779.32
+    um2: 40265.68
   - at:
       mul: true
       smode: true
       mmu: true
       rvfi: true
       imsic: true
-    um2: 74020.24
+    um2: 75583.48
   corner:
     tool: ecc
     pdk: ics55
     freq_mhz: 100
     measured: '2026-09-16'
     toolchain: bsc 2026.01 · yosys 0.68+195 · ecc 0.1.0a11
-    gen_digest: sha256:d226571c53b27e5b
+    gen_digest: sha256:58602fc0ea8ca343
