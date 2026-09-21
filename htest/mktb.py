@@ -551,7 +551,7 @@ RV_FIN = "          done <= True;\n" if rvfi else """          if (bad) $display
 
 (out / f"Prog{label}.bsv").write_text(f"""package Prog{label};
 
-// 由 tb/mktb.py 生成，勿手改。改程序改那个脚本。
+// 由 htest/mktb.py 生成，勿手改。改程序改那个脚本。
 // 这一点：mul={mul} smode={smode} mmu={mmu}
 
 Integer progLen = {len(prog)};
