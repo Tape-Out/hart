@@ -2,7 +2,7 @@
 
 RISC-V application core in Bluespec: RV32IMAC first, then Sv32 and RV64.
 
-![maturity](https://img.shields.io/badge/maturity-planned-lightgrey) ![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0%20OR%20MulanPSL--2.0-blue)
+![maturity](https://img.shields.io/badge/maturity-simulated-yellow) ![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0%20OR%20MulanPSL--2.0-blue)
 
 Part of the [Tape-Out](https://github.com/Tape-Out) IP library: Bluespec IP over the
 bus-neutral contracts in [`hwcore`](https://github.com/Tape-Out/hwcore), assembled by

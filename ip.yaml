@@ -14,7 +14,7 @@ identity:
   - riscv
   ip_family: hart
   integration_profile: []
-  maturity: planned
+  maturity: simulated
 contract:
   version: 1
   ctrl:
