@@ -23,6 +23,8 @@ module mkMuldiv(MuldivIfc);
   Reg#(Bool)     negQ  <- mkReg(False);
   Reg#(Bool)     negR  <- mkReg(False);
   Reg#(Bool)     fin   <- mkReg(False);
+  // 乘数按无符号吃进去；有符号且为负时，高半字多出一份被乘数，出结果时减掉
+  Reg#(Bool)     fixB  <- mkReg(False);
 
   Bool isMulOp = op == OpMul || op == OpMulh || op == OpMulhsu || op == OpMulhu;
 
@@ -61,6 +63,7 @@ module mkMuldiv(MuldivIfc);
         Bool sb = (o == OpMul || o == OpMulh);
         mcand  <= sa ? signExtend(a) : zeroExtend(a);
         mplier <= b;
+        fixB   <= sb && b[31] == 1;
         step   <= 4;
       end
       default: begin
@@ -71,6 +74,7 @@ module mkMuldiv(MuldivIfc);
         mplier <= ua;
         negQ   <= sg && (a[31] != b[31]) && b != 0;
         negR   <= sg && a[31] == 1;
+        fixB   <= False;
         step   <= 32;
       end
     endcase
@@ -81,7 +85,7 @@ module mkMuldiv(MuldivIfc);
   method Bit#(32) result;
     case (op)
       OpMul:   return acc[31:0];
-      OpMulh, OpMulhsu, OpMulhu: return acc[63:32];
+      OpMulh, OpMulhsu, OpMulhu: return acc[63:32] - (fixB ? mcand[31:0] : 0);
       OpDiv, OpDivu: return negQ ? (~quot + 1) : quot;
       default: begin
         Bit#(32) rem = acc[31:0];
