@@ -9,6 +9,7 @@
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -37,6 +38,8 @@ SKIP = {"rv32ui-p-ma_data"}
 build = out / f"isa{label}"
 build.mkdir(parents=True, exist_ok=True)
 suites = ["rv32ui"] + (["rv32um"] if mul else [])
+if want := os.environ.get("ISA_SUITES"):
+    suites = [s for s in suites + ["rv32mi"] if s in want.split(",")]
 march = ("rv32im" if mul else "rv32i") + "_zicsr_zifencei"
 n = 0
 for suite in suites:
@@ -61,7 +64,7 @@ for suite in suites:
         words = [int.from_bytes(b[i:i + 4], "little") for i in range(0, len(b), 4)]
         hexf = build / f"{name}.hex"
         hexf.write_text("\n".join(f"{w:08x}" for w in words + [0] * (WORDS - len(words))) + "\n")
-        cap = "Isa" + "".join(x.capitalize() for x in (suite + "_" + s.stem).split("_")) + label
+        cap = "Isa" + "".join(x.capitalize() for x in re.split(r"[_-]", f"{suite}_{s.stem}")) + label
         (out / f"{cap}Tb.bsv").write_text(f'''package {cap}Tb;
 
 import RegFile::*;
