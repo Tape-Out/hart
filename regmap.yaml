@@ -1,4 +1,4 @@
-ip: hart
+ip: rvcore
 contract: { aw: 12, dw: 32 }
 base: 0x0
 size: 0x1000

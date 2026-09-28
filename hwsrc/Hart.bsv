@@ -5,7 +5,7 @@ import ConfigReg::*;
 import RegIf::*;
 import Decode::*;
 import Muldiv::*;
-import HartRegs::*;
+import RvcoreRegs::*;
 import Mmu::*;
 import DReg::*;
 import Rvfi::*;
@@ -93,7 +93,7 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
     // 生成的包装层照统一的形状写，这两条 proviso 把它们钉在唯一合法的值上。
     provisos (Add#(aw, 0, 12), Add#(dw, 0, 32));
 
-  HartRegsIfc#(aw, dw) csrf <- mkHartRegs(HartRegsCfg { smode: cfg.smode, mmu: cfg.mmu });
+  RvcoreRegsIfc#(aw, dw) csrf <- mkRvcoreRegs(RvcoreRegsCfg { smode: cfg.smode, mmu: cfg.mmu });
   MuldivIfc md <- (cfg.mul ? mkMuldiv : mkMuldivNone);
 
   Vector#(32, Reg#(Bit#(32))) rf <- replicateM(mkConfigReg(0));
