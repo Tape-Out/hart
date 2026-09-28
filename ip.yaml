@@ -163,3 +163,12 @@ area:
     measured: '2026-09-28'
     toolchain: bsc 2026.01 · yosys 0.68+195 · ecc 0.1.0a11
     gen_digest: sha256:9fe43af8b07a2a32
+dt:
+  node: cpu
+  compatible: [riscv]
+  props:
+  - { name: "riscv,isa-base", value: rv32i }
+  - { name: "riscv,isa-extensions", value: [i, m, zicsr, zifencei], when: { mul: true } }
+  - { name: "riscv,isa-extensions", value: [i, zicsr, zifencei], when: { mul: false } }
+  - { name: mmu-type, value: "riscv,sv32", when: { mmu: true } }
+  - { name: mmu-type, value: "riscv,none", when: { mmu: false } }
