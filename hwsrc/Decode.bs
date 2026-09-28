@@ -121,7 +121,9 @@ decode i hasMul =
                  else d0 { kind = Csr; csrImm = fn3[2:2] == 1;
                            csrOp = csrKind fn3[1:0];
                            imm = zeroExtend i[19:15] }
-       0x0f -> d0 { kind = Sys }        -- fence 当空操作，本实现顺序执行
+       -- fence 当空操作，本实现顺序执行。译成 addi x0, x0, 0：记成 Sys 的话立即数是 0，
+       -- 执行那边就当成 ecall 陷进去了（riscv-tests 的 p 环境每个测试都撞在这里）
+       0x0f -> d0 { kind = Imm; alu = OpAdd; rd = 0; rs1 = 0; imm = 0 }
        _ -> d0
 
 -- 写不写寄存器堆。x0 永远不写，判一次省得每处都判。
