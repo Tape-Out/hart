@@ -97,7 +97,7 @@ deps:
   rvfi: ^0.1
 area:
   base:
-    fixed: 37450.84
+    fixed: 38095.68
   margin: 0.0
   model: points-additive
   error:
@@ -113,53 +113,53 @@ area:
       mmu: false
       rvfi: false
       imsic: false
-    um2: 37450.84
+    um2: 38095.68
   - at:
       mul: true
       smode: false
       mmu: false
       rvfi: false
       imsic: false
-    um2: 45141.6
+    um2: 45485.44
   - at:
       mul: false
       smode: true
       mmu: false
       rvfi: false
       imsic: false
-    um2: 43127.0
+    um2: 42339.36
   - at:
       mul: false
       smode: true
       mmu: true
       rvfi: false
       imsic: false
-    um2: 68888.96
+    um2: 68028.52
   - at:
       mul: false
       smode: false
       mmu: false
       rvfi: true
       imsic: false
-    um2: 37217.04
+    um2: 37797.76
   - at:
       mul: false
       smode: false
       mmu: false
       rvfi: false
       imsic: true
-    um2: 40265.68
+    um2: 39144.0
   - at:
       mul: true
       smode: true
       mmu: true
       rvfi: true
       imsic: true
-    um2: 75583.48
+    um2: 76436.36
   corner:
     tool: ecc
     pdk: ics55
     freq_mhz: 100
-    measured: '2026-09-16'
+    measured: '2026-09-28'
     toolchain: bsc 2026.01 · yosys 0.68+195 · ecc 0.1.0a11
-    gen_digest: sha256:58602fc0ea8ca343
+    gen_digest: sha256:7cc06b390dbcb5b9
