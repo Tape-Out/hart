@@ -89,6 +89,15 @@ module mkMmu#(Bool isFetch)(MmuIfc);
   function Bool pteOk(Bit#(32) p) = p[0] == 1 && !(p[2] == 1 && p[1] == 0);
   function Bool isLeaf(Bit#(32) p) = p[1] == 1 || p[3] == 1;
 
+  // 下游在途的那一笔：发出去就顶着不动，直到答复回来（RegManager 的约定）。
+  // 原来下游的请求是当拍组合出来的，存储一慢就出事：satp 刚打开时还有一笔翻译前
+  // 转发下去的取指在途，走表却起步换成了页表项地址，那笔取指的答复被当成页表项；
+  // sfence 作废正在走的那一趟时，迟到的页表项又被当成取指答复交给核。
+  // pDrop 记的是后一种：答复回来就丢，谁也不给。
+  Reg#(Bool)            pend  <- mkConfigReg(False);
+  Reg#(RegReq#(32, 32)) pReq  <- mkConfigReg(unpack(0));
+  Reg#(Bool)            pDrop <- mkConfigReg(False);
+
   Reg#(Bool) faultR <- mkConfigReg(False);
   // 判定缺页的地方有两处（走表走到死路、命中但权限不对），而寄存器只许一条
   // 规则写——两条规则写同一个寄存器就是并行冲突。所以判定只发线。
@@ -98,6 +107,25 @@ module mkMmu#(Bool isFetch)(MmuIfc);
   // 与「物理内存不在」，所以要单记一位。
   Reg#(Bool) pfR    <- mkConfigReg(False);
   PulseWire  setA   <- mkPulseWire;
+
+  Bool fwdV = upV && !faultR && (!on || hitOk);
+  RegReq#(32, 32) walkReq = RegReq { addr: wad, write: False, wdata: 0, wstrb: 4'hF };
+  RegReq#(32, 32) fwdReq  = RegReq { addr: on ? phys : upR.addr, write: upR.write,
+                                     wdata: upR.wdata, wstrb: upR.wstrb };
+  Bool            dnV = pend || wst != 0 || fwdV;
+  RegReq#(32, 32) dnR = pend ? pReq : (wst != 0 ? walkReq : fwdReq);
+  Bool            live = dnRspV && !pDrop;
+
+  rule trackDn;
+    if (dnRspV) begin
+      pend  <= False;
+      pDrop <= False;
+    end else if (dnV) begin
+      pend <= True;
+      pReq <= dnR;
+      if (fenceW && wst != 0) pDrop <= True;
+    end
+  endrule
 
   // 清表时连正在走的那一趟也作废：它读到的页表项可能早于这次 sfence，
   // 学进去就是一条清不掉的旧翻译。请求还举着，下一拍重走。
@@ -109,13 +137,13 @@ module mkMmu#(Bool isFetch)(MmuIfc);
   // 缺失就起步走表。根页表的物理地址是 satp.PPN 左移十二位，
   // 一级的下标是虚页号的高十位。答错的那一拍不起步：那一拍举着的还是
   // 刚判了缺页的那一笔，再走一趟会给下一笔请求凭空再答一个错。
-  rule startWalk (miss && wst == 0 && !fenceW && !faultR);
+  rule startWalk (miss && wst == 0 && !fenceW && !faultR && !pend);
     wad  <= {satpW[19:0], 12'b0} + {20'b0, vpn[19:10], 2'b0};
     wvpn <= vpn;
     wst  <= 1;
   endrule
 
-  rule stepWalk (wst != 0 && dnRspV && !fenceW);
+  rule stepWalk (wst != 0 && live && !fenceW);
     Bit#(32) p = dnRspX.rdata;
     if (dnRspX.err) begin
       wst <= 0;
@@ -146,7 +174,7 @@ module mkMmu#(Bool isFetch)(MmuIfc);
   endrule
 
   // 权限不对的命中不必走表，直接判缺页。答错那一拍不判，理由同上。
-  rule permFault (on && upV && hitBad && wst == 0 && !faultR);
+  rule permFault (on && upV && hitBad && wst == 0 && !faultR && !pend);
     setF.send();
   endrule
 
@@ -171,17 +199,13 @@ module mkMmu#(Bool isFetch)(MmuIfc);
     // 乐观地答「收得下」是安全的，契约写明了理由：发起方在收到答复之前把
     // valid 与 req 顶着不动，所以真正决定走不走的是 rspValid，不是 ready。
     method Bool ready = faultR ? True : (wst == 0);
-    method Bool rspValid = faultR ? True : (wst == 0 && dnRspV);
+    method Bool rspValid = faultR ? True : (wst == 0 && live);
     method RegRsp#(32) rsp = faultR ? RegRsp { rdata: 0, err: True } : dnRspX;
   endinterface
 
   interface RegManager down;
-    method Bool valid = (wst != 0) ? True
-                      : (upV && !faultR && (!on || hitOk));
-    method RegReq#(32, 32) req =
-      (wst != 0) ? RegReq { addr: wad, write: False, wdata: 0, wstrb: 4'hF }
-                 : RegReq { addr: on ? phys : upR.addr, write: upR.write,
-                            wdata: upR.wdata, wstrb: upR.wstrb };
+    method Bool valid = dnV;
+    method RegReq#(32, 32) req = dnR;
     method Action ready(Bool v); dnRdy._write(v); endmethod
     method Action resp(Bool v, RegRsp#(32) x);
       dnRspV._write(v);

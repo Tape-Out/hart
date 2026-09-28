@@ -354,24 +354,27 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
 
   Bit#(32) pfAddr  = pc + 4;
 
-  // 这笔响应是哪个地址的。原来直接拿当拍发出去的地址判，那假设「响应与请求
-  // 同拍」——只对组合应答的目标成立。存储慢一拍（缓存就是），回来的是上一笔，
-  // 链接会把上一笔的数当成下一条指令接上。
+  // 发出去的那一笔顶着不动，直到答复回来，这是 RegManager 的约定，访存口一直这么做。
+  // 取指口原来以 ready 为收下，收下之后照样换地址（执行转取指时 pc+4 换成 pc，
+  // 陷入那一拍干脆放下 valid）。直连缓存时 ready 老实，看不出来；MMU 的上游口信
+  // 这条约定、乐观地答 ready，缓存还在为旧地址填行，核却把新地址记成在途的那一笔，
+  // 答复回来就记错了主：计时器中断处理程序的头一条被换成了别处的指令（soc-mpu）。
   //
-  // 记的时机是「被收下但没同拍答复」。组合目标上两件事同拍发生，什么也记不下，
-  // 判的还是当拍地址，行为一字不变。
+  // 组合应答的目标上举手与答复同拍，什么也记不下，行为一字不变。
   Reg#(Bool)     inFlt <- mkConfigReg(False);
   Reg#(Bit#(32)) fltAd <- mkConfigReg(0);
   Bool     needNow = st == Fetch && !halted && !irqPending;
   // 除法一位一拍要磨三十几拍，那几拍里不举手——请求举着也没处放，
   // 只是白占总线仲裁。末拍再举，链接照样接得上。
   Bool     wantPf  = st != Fetch && !halted && (st != Muls || md.done);
+  Bool     askV    = inFlt || needNow || wantPf;
 
   // 一条指令的最后一拍都走这里：顺序下一条这拍已经取回来了就直接接上，
   // 省掉回 Fetch 的那一拍。访存、乘除、读写 CSR 的末拍 pc 还停在本条上，
   // pfAddr 正好是下一条；跳走了地址对不上，照旧回 Fetch 重取。
-  Bit#(32) askAd = needNow ? pc : pfAddr;
-  Bit#(32) rspAd = inFlt ? fltAd : askAd;
+  Bit#(32) askAd = inFlt ? fltAd : needNow ? pc : pfAddr;
+  // 答复一定是举着的那一笔的：对不上当前要的地址就丢掉
+  Bit#(32) rspAd = askAd;
   function Action advance(Bit#(32) nPc) = action
     // 待决中断必须让链接断开：链接跳过的正是 Fetch 那一拍，而中断只在那里
     // 检查。不断开的话一段直线代码能把中断拖到段尾，S 软件中断的用例就是
@@ -387,7 +390,7 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
 
 
   rule track;
-    if ((needNow || wantPf) && iRdy && !iRspV) begin
+    if (askV && !iRspV) begin
       inFlt <= True;
       fltAd <= askAd;
     end else if (iRspV)
@@ -700,7 +703,7 @@ module mkHart#(HartCfg cfg)(HartIfc#(aw, dw))
   endrule
 
   RegManager#(32, 32) iUp = interface RegManager;
-      method Bool valid = needNow || wantPf;
+      method Bool valid = askV;
       method RegReq#(32, 32) req = RegReq { addr: askAd, write: False,
                                             wdata: 0, wstrb: 4'hF };
       method Action ready(Bool v); iRdy._write(v); endmethod

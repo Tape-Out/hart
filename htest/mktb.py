@@ -574,7 +574,7 @@ endfunction
 endpackage
 """, encoding="utf-8")
 
-(out / f"Hart{label}Tb.bsv").write_text(f'''package Hart{label}Tb;
+tb = f'''package Hart{label}Tb;
 
 import RegFile::*;
 import ConfigReg::*;
@@ -688,5 +688,54 @@ module mkHart{label}Tb(Empty);
 {IM_RULE}{RV_RULE}endmodule
 
 endpackage
-''', encoding="utf-8")
+'''
+(out / f"Hart{label}Tb.bsv").write_text(tb, encoding="utf-8")
+
+# 同一段程序再跑一遍，取指口换成 MMU 上游口那种形状：ready 恒真，收下那拍记住地址，
+# 两拍后按记下的地址作答。它信发起方在答复前顶着请求不动；核一旦中途换地址，答复就记错了主
+FAST = '''  // 取指口：ROM 组合读出
+  rule fetch;
+    Bit#(32) a = cpu.imem.req.addr;
+    // 取指这一侧的 MMU 也走表，页表项从这个口读
+    Bit#(32) w = inRom(a)  ? romWord((a - 32'h8000_0000) >> 2)
+               : inRam(a)  ? ram.sub(ramIx(a))
+               : inRoot(a) ? rootPte(a[11:2]) : 32'h00000013;
+    cpu.imem.ready(cpu.imem.valid);
+    cpu.imem.resp(cpu.imem.valid, RegRsp { rdata: w, err: False });
+  endrule
+'''
+SLOW = '''  // 取指口：ready 恒真，收下那拍记地址，两拍后按记下的地址作答
+  Reg#(Bool)     fBusy <- mkReg(False);
+  Reg#(Bit#(32)) fAd   <- mkReg(0);
+  Reg#(Bit#(2))  fLeft <- mkReg(0);
+  rule fetch;
+    Bit#(32) w = inRom(fAd)  ? romWord((fAd - 32'h8000_0000) >> 2)
+               : inRam(fAd)  ? ram.sub(ramIx(fAd))
+               : inRoot(fAd) ? rootPte(fAd[11:2]) : 32'h00000013;
+    Bool ans = fBusy && fLeft == 0;
+    // 契约本身也要验，不只看结果：答复之前请求一变或 valid 一放就是错
+    if (fBusy && !ans && !(cpu.imem.valid && cpu.imem.req.addr == fAd)) begin
+      $display("FAIL imem request moved while in flight: held %08h, now %s %08h",
+               fAd, cpu.imem.valid ? "valid" : "idle", cpu.imem.req.addr);
+      $finish(1);
+    end
+    cpu.imem.ready(True);
+    cpu.imem.resp(ans, RegRsp { rdata: w, err: False });
+    if (ans) fBusy <= False;
+    else if (fBusy) fLeft <= fLeft - 1;
+    else if (cpu.imem.valid) begin
+      fBusy <= True;
+      fAd   <= cpu.imem.req.addr;
+      fLeft <= 2;
+    end
+  endrule
+'''
+slow = tb
+for a, b in ((f"package Hart{label}Tb;", f"package Hart{label}SlowTb;"),
+             (f"module mkHart{label}Tb(Empty);", f"module mkHart{label}SlowTb(Empty);"),
+             ("cyc > 20000", "cyc > 80000"), (FAST, SLOW)):
+    if slow.count(a) != 1:
+        raise SystemExit(f"慢取指那一份没生成成：模板里找不到 {a.strip()[:40]}")
+    slow = slow.replace(a, b)
+(out / f"Hart{label}SlowTb.bsv").write_text(slow, encoding="utf-8")
 print(f"  程序 {len(prog)} 条指令，自检 {len(EXPECT)} 项（mul={mul} smode={smode} mmu={mmu} rvfi={rvfi} imsic={imsic}）")

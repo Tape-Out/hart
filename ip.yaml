@@ -28,13 +28,13 @@ features:
     default: true
     desc: M 扩展。乘法四周期、除法逐位，见 E28
     area:
-      fixed: 7690.76
+      fixed: 8526.56
   smode:
     type: bool
     default: false
     desc: 监管者态。委托、S 的陷入现场与 sret；E27 证过特权级范围是一个开关而不是架构分岔
     area:
-      fixed: 5676.16
+      fixed: 6172.32
   mmu:
     type: bool
     default: false
@@ -47,16 +47,17 @@ features:
     default: false
     desc: RVFI 提交记录端口（riscv-formal rvfi.rst），只给形式验证用；关掉时整片消掉
     area:
-      fixed: 0.0
+      fixed: 318.36
   imsic:
     type: bool
     default: false
     desc: AIA 的间接 CSR（miselect、mireg、mtopei）与中断文件窗口；关掉时三个地址报非法指令
     area:
-      fixed: 2814.84
+      fixed: 3584.84
 test:
-  # 访存口在收到响应之前一直顶着 valid 与 req 不动，「响应即已被接收」，所以不看 ready
+  # 取指口与访存口在收到响应之前一直顶着 valid 与 req 不动，「响应即已被接收」，所以不看 ready
   deadread:
+  - iRdy
   - dRdy
   # MMU 下游同理，而且它必须不看：ready 一旦牵着下游，「上游的请求 -> 下游的
   # valid -> 下游的 ready -> 上游的 ready」就绕成一个环，bsc 会把接线那条规则
@@ -97,7 +98,7 @@ deps:
   rvfi: ^0.1
 area:
   base:
-    fixed: 38095.68
+    fixed: 37520.84
   margin: 0.0
   model: points-additive
   error:
@@ -113,62 +114,64 @@ area:
       mmu: false
       rvfi: false
       imsic: false
-    um2: 38095.68
+    um2: 37520.84
   - at:
       mul: true
       smode: false
       mmu: false
       rvfi: false
       imsic: false
-    um2: 45485.44
+    um2: 46047.4
   - at:
       mul: false
       smode: true
       mmu: false
       rvfi: false
       imsic: false
-    um2: 42339.36
+    um2: 43693.16
   - at:
       mul: false
       smode: true
       mmu: true
       rvfi: false
       imsic: false
-    um2: 68028.52
+    um2: 68908.84
   - at:
       mul: false
       smode: false
       mmu: false
       rvfi: true
       imsic: false
-    um2: 37797.76
+    um2: 37839.2
   - at:
       mul: false
       smode: false
       mmu: false
       rvfi: false
       imsic: true
-    um2: 39144.0
+    um2: 41105.68
   - at:
       mul: true
       smode: true
       mmu: true
       rvfi: true
       imsic: true
-    um2: 76436.36
+    um2: 78178.24
   corner:
     tool: ecc
     pdk: ics55
     freq_mhz: 100
     measured: '2026-09-28'
     toolchain: bsc 2026.01 · yosys 0.68+195 · ecc 0.1.0a11
-    gen_digest: sha256:9fe43af8b07a2a32
+    gen_digest: sha256:cf70496e2419530a
 dt:
   node: cpu
   compatible: [riscv]
   props:
-  - { name: "riscv,isa-base", value: rv32i }
-  - { name: "riscv,isa-extensions", value: [i, m, zicsr, zifencei], when: { mul: true } }
-  - { name: "riscv,isa-extensions", value: [i, zicsr, zifencei], when: { mul: false } }
-  - { name: mmu-type, value: "riscv,sv32", when: { mmu: true } }
-  - { name: mmu-type, value: "riscv,none", when: { mmu: false } }
+  - {name: "riscv,isa-base", value: rv32i}
+  - {name: "riscv,isa-extensions", value: [i, m, zicsr, zifencei], when: {mul: 
+        true}}
+  - {name: "riscv,isa-extensions", value: [i, zicsr, zifencei], when: {mul: 
+        false}}
+  - {name: mmu-type, value: "riscv,sv32", when: {mmu: true}}
+  - {name: mmu-type, value: "riscv,none", when: {mmu: false}}
