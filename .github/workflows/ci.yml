@@ -5,3 +5,6 @@ jobs:
     uses: Tape-Out/.github/.github/workflows/ip.yml@main
     permissions:
       contents: write
+    with:
+      # htest/mkisatb.py 用它编 riscv-tests
+      apt: gcc-riscv64-unknown-elf
